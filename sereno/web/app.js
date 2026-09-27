@@ -66,10 +66,12 @@ function dueText(ts) {
   const t = m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
   return ms < 0 ? `Overdue by ${t}` : `Due in ${t}`;
 }
-function toast(msg) {
+function toast(msg, ms = 2600) {
+  let box = document.querySelector(".toasts");
+  if (!box) { box = h("div", { class: "toasts", role: "status", "aria-live": "polite" }); document.body.append(box); }
   const t = h("div", { class: "toast" }, msg);
-  document.body.append(t);
-  setTimeout(() => t.remove(), 2600);
+  box.append(t);
+  setTimeout(() => t.remove(), ms);
 }
 function pill(status, label) { return h("span", { class: `pill ${status}` }, label); }
 function can(p) { return ME && ME.permissions.includes(p); }
@@ -295,9 +297,12 @@ async function renderDocuments() {
     try {
       const r = await api("/api/documents", { method: "POST", form });
       const errs = r.results.filter(x => x.error);
-      errs.forEach(e => toast(`${e.filename}: ${e.error}`));
+      const byMsg = new Map();
+      errs.forEach(e => byMsg.set(e.error, [...(byMsg.get(e.error) || []), e.filename]));
+      byMsg.forEach((names, msg) => toast(names.length > 1 ? `${names.length} files: ${msg}` : `${names[0]}: ${msg}`, 7000));
+      const ok = r.results.length - errs.length;
       const dup = r.results.filter(x => x.duplicate).length;
-      toast(`${r.results.length - errs.length} uploaded${dup ? ` (${dup} already uploaded before)` : ""}`);
+      if (ok) toast(`${ok} uploaded${dup ? ` (${dup} already uploaded before)` : ""}`);
       load();
     } catch (e) { toast(e.message); } finally { drop.classList.remove("over"); }
   };

@@ -7,3 +7,5 @@ var/
 .env
 eval_data/
 reports/
+*.egg-info/
+run.log

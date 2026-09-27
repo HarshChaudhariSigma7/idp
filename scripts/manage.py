@@ -52,7 +52,7 @@ def create_staff(email: str, name: str, role: str):
     create_user("-", email, name, role)
 
 
-def seed_demo(tenant_id: str, n: str = "12", review: str = "yes"):
+def seed_demo(tenant_id: str, n: str = "12", review: str = "yes", leave_open: str = "4"):
     """Synthetic documents through the real pipeline with the offline fake model, including
     realistic misreads, then (optionally) simulated reviewers who fix them. SIMULATED DATA: the
     dashboard numbers it produces demonstrate the product, they are not accuracy claims."""
@@ -93,8 +93,14 @@ def seed_demo(tenant_id: str, n: str = "12", review: str = "yes"):
         jobs.drain()
     if review == "yes":
         with session_scope() as s:
+            waiting = s.execute(select(Document).where(Document.tenant_id == tenant_id, Document.reviewed_at.is_(None),
+                                                       Document.review_entered_at.is_not(None), Document.is_qa_sample.is_(False))
+                                .order_by(Document.created_at)).scalars().all()
+            keep = {d.id for d in waiting[len(waiting) - int(leave_open):]} if int(leave_open) else set()
             for d in s.execute(select(Document).where(Document.tenant_id == tenant_id, Document.reviewed_at.is_(None),
                                                       Document.review_entered_at.is_not(None))).scalars():
+                if d.id in keep:
+                    continue  # left in the queue so the reviewer role has real work to try
                 sd, reviewer = truths.get(d.id), s.get(User, d.assigned_to)
                 if sd is None or reviewer is None:
                     continue
