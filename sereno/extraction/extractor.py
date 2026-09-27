@@ -50,7 +50,7 @@ def _img(img: np.ndarray, long_edge: int) -> dict:
 # --- pass A --------------------------------------------------------------------------------------
 
 def run_primary(llm: LLMClient, spec: DocSpec, pages: list[PreparedPage], model: str,
-                long_edge: int, template_hints: str | None = None) -> LLMResult:
+                long_edge: int, template_hints: str | None = None, effort: str | None = None) -> LLMResult:
     content: list[dict] = []
     long_edge = _budget_edge(long_edge, len(pages))
     for p in pages:
@@ -61,7 +61,7 @@ def run_primary(llm: LLMClient, spec: DocSpec, pages: list[PreparedPage], model:
     content.append(text_block(prompts.field_guide(spec, template_hints) +
                               "\n\nExtract every field and line item into the required JSON structure."))
     return llm.structured(pass_name="primary", model=model, system=prompts.PRIMARY_SYSTEM, content=content,
-                          schema=primary_schema(spec))
+                          schema=primary_schema(spec), effort=effort)
 
 
 def _bbox(b: dict | None) -> dict | None:
@@ -130,26 +130,30 @@ def run_secondary(llm: LLMClient, spec: DocSpec, pages: list[PreparedPage], mode
 
 
 def _align_lines(a_lines: list[dict], b_lines: list[dict], spec: DocSpec) -> list[int | None]:
-    """Map each A line to a B line index. Same length => positional; otherwise greedy by amounts."""
+    """Map each A line to a B line. Same count => positional. Otherwise best match on amounts AND
+    description, so a row missed by one reading shifts nothing (every later row would otherwise be
+    compared with its neighbour and look wrong)."""
     if len(a_lines) == len(b_lines):
         return list(range(len(a_lines)))
+    from rapidfuzz import fuzz
     keys = [f.name for f in spec.high_stakes_line_fields if f.is_numeric]
+    has_desc = any(f.name == "description" for f in spec.line_fields)
+
+    def score(a: dict, b: dict) -> float:
+        sc = sum(1.0 for k in keys if a[k].value is not None and
+                 values_agree(a[k].spec.type, a[k].value, normalise(a[k].spec.type, (b.get(k) or {}).get("value"))))
+        if has_desc and a["description"].value:
+            sc += 2.0 * fuzz.token_set_ratio(str(a["description"].value), str((b.get("description") or {}).get("value") or "")) / 100
+        return sc
+
+    pairs = sorted(((score(a, b), i, j) for i, a in enumerate(a_lines) for j, b in enumerate(b_lines)), reverse=True)
+    mapping: list[int | None] = [None] * len(a_lines)
     used: set[int] = set()
-    mapping: list[int | None] = []
-    for a in a_lines:
-        best, best_score = None, 0
-        for j, b in enumerate(b_lines):
-            if j in used:
-                continue
-            score = sum(1 for k in keys if a[k].value is not None and
-                        values_agree(a[k].spec.type, a[k].value, normalise(a[k].spec.type, (b.get(k) or {}).get("value"))))
-            if score > best_score:
-                best, best_score = j, score
-        if best is not None and best_score >= 2:
-            used.add(best)
-        else:
-            best = None
-        mapping.append(best)
+    for sc, i, j in pairs:
+        if sc < 2.0 or mapping[i] is not None or j in used:
+            continue
+        mapping[i] = j
+        used.add(j)
     return mapping
 
 
@@ -167,6 +171,7 @@ def apply_secondary(doc: ExtractedDoc, data: dict) -> list[FieldValue]:
             disagreements.append(fa)
     b_lines = data.get("line_items") or []
     if doc.spec.line_fields:
+        doc.row_counts["primary"], doc.row_counts["secondary"] = len(doc.lines), len(b_lines)
         mapping = _align_lines(doc.lines, b_lines, doc.spec)
         for i, line in enumerate(doc.lines):
             j = mapping[i]

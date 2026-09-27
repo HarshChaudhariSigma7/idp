@@ -7,6 +7,7 @@ not product quality. Never quote synthetic accuracy to a customer.
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import random
@@ -463,3 +464,42 @@ def write_dataset(out: Path, n: int = 4, seed: int = 7) -> list[Path]:
                 indent=1, ensure_ascii=False))
             paths.append(f)
     return paths
+
+
+def einvoice_qr_text(truth: dict, lines: list[dict], overrides: dict | None = None) -> str:
+    """A GST e-invoice QR payload in the NIC format (JWT). The signature is a placeholder: real
+    ones are RS256-signed by the IRP and verified when the NIC public key is configured."""
+    import base64
+    data = {"SellerGstin": truth["supplier_gstin"], "BuyerGstin": truth.get("buyer_gstin"),
+            "DocNo": truth["invoice_number"], "DocTyp": "INV",
+            "DocDt": date.fromisoformat(truth["invoice_date"]).strftime("%d/%m/%Y"),
+            "TotInvVal": truth["grand_total"], "ItemCnt": len(lines),
+            "MainHsnCode": lines[0]["hsn_sac"] if lines else "", "Irn": hashlib.sha256(f"{truth['supplier_gstin']}{truth['invoice_number']}".encode()).hexdigest(), "IrnDt": truth["invoice_date"] + " 10:00:00"}
+    data.update(overrides or {})
+    enc = lambda obj: base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")  # noqa: E731
+    return ".".join([enc({"alg": "RS256", "typ": "JWT"}), enc({"data": json.dumps(data), "iss": "NIC"}),
+                     base64.urlsafe_b64encode(b"test-signature").decode().rstrip("=")])
+
+
+def add_qr(img: np.ndarray, text: str, where: tuple[float, float] = (0.72, 0.02), size_frac: float = 0.24) -> np.ndarray:
+    import qrcode
+    q = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=6, border=2)
+    q.add_data(text)
+    q.make(fit=True)
+    qr_img = q.make_image(fill_color="black", back_color="white").convert("RGB")
+    side = int(img.shape[1] * size_frac)
+    qr_img = qr_img.resize((side, side), Image.NEAREST)
+    out = Image.fromarray(img.copy())
+    out.paste(qr_img, (int(img.shape[1] * where[0]), int(img.shape[0] * where[1])))
+    return np.asarray(out)
+
+
+def make_einvoice(rng: random.Random, bucket: str = "good_scan", qr_overrides: dict | None = None,
+                  upi: bool = False) -> SynthDoc:
+    truth, lines = invoice_truth(rng, 3)
+    img, boxes, raw = render_invoice(truth, lines)
+    img = add_qr(img, einvoice_qr_text(truth, lines, qr_overrides))
+    if upi:
+        img = add_qr(img, f"upi://pay?pa=vendor@okaxis&pn={truth['supplier_name'].replace(' ', '%20')}&am={truth['grand_total']:.2f}&cu=INR",
+                     where=(0.06, 0.80), size_frac=0.14)
+    return SynthDoc("invoice", truth, lines, boxes, raw, image=degrade(img, bucket, rng) if bucket != "clean" else img, bucket=bucket)

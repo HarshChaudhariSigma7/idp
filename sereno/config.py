@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     model_clean: str = "claude-sonnet-5"
     model_triage: str = "claude-sonnet-5"
     extraction_effort: str = "high"
+    extraction_effort_hard: str = "xhigh"  # handwriting, Indic script, poor scans: think harder
+    crop_reads: bool = True                # third blind read on zoomed crops (disputes, hard docs, failed maths)
+    arithmetic_repair: bool = True
+    # NIC IRP public keys (PEM) to verify e-invoice QR signatures; without them QR data is used unverified
+    einvoice_public_keys_pem: list[str] = Field(default_factory=list)
     # Server-side refusal fallback for Opus-tier requests (Claude API only, beta).
     enable_refusal_fallback: bool = True
     llm_max_retries: int = 3

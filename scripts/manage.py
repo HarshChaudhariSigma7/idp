@@ -60,7 +60,7 @@ def seed_demo(tenant_id: str, n: str = "12", review: str = "yes", leave_open: st
 
     from sereno import jobs, pipeline
     from sereno.eval.fake_model import TruthResponder
-    from sereno.eval.synth import make_invoice, make_lr, to_jpeg_bytes
+    from sereno.eval.synth import make_einvoice, make_invoice, make_lr, to_jpeg_bytes
     from sereno.extraction.llm import FakeLLM, set_llm
     from sereno.extraction.normalize import values_agree
     from sereno.models import Document
@@ -70,11 +70,13 @@ def seed_demo(tenant_id: str, n: str = "12", review: str = "yes", leave_open: st
     rng = random.Random(42)
     with session_scope() as s:
         uid = s.query(User).filter(User.tenant_id == tenant_id).first().id
-    plans = ["digital", "good_scan", "good_scan", "poor_scan", "bilingual", "lr", "lr_hw", "poor_hw"] * (n // 8 + 1)
+    plans = ["digital", "einvoice", "good_scan", "poor_scan", "bilingual", "lr", "einvoice_misread", "lr_hw", "poor_hw"] * (n // 9 + 1)
     truths = {}
     for i, kind in enumerate(plans[:n]):
         if kind.startswith("lr"):
             sd = make_lr(rng)
+        elif kind.startswith("einvoice"):
+            sd = make_einvoice(rng, "good_scan", upi=kind == "einvoice")
         else:
             sd = make_invoice(rng, {"poor_hw": "poor_scan"}.get(kind, kind), n_lines=rng.randint(2, 5))
         hw = kind in ("lr_hw", "poor_hw")
@@ -85,6 +87,9 @@ def seed_demo(tenant_id: str, n: str = "12", review: str = "yes", leave_open: st
             errors = {"primary": {"grand_total": sd.truth["grand_total"] + 100}, "secondary": {"grand_total": sd.truth["grand_total"] + 100}}
         elif hw and sd.doc_type == "lr":
             errors = {"primary": {"charged_weight_kg": sd.truth["charged_weight_kg"] + 10}}
+        if kind == "einvoice_misread":  # both readings misread one character; the signed QR catches it
+            g = sd.truth["supplier_gstin"]
+            errors = {p: {"supplier_gstin": g[:4] + ("8" if g[4] != "8" else "3") + g[5:]} for p in ("primary", "secondary")}
         set_llm(FakeLLM(TruthResponder(sd, errors=errors, handwriting=hw)))
         data = sd.pdf if sd.pdf else to_jpeg_bytes(sd.image)
         with session_scope() as s:

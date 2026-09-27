@@ -195,7 +195,8 @@ def _field_out(f: ExtractedField) -> dict:
     return {"id": f.id, "key": f.key, "name": f.field_name, "label": f.label, "group": f.group, "line_index": f.line_index,
             "type": f.value_type, "high_stakes": f.is_high_stakes, "value": effective_value(f), "extracted_value": f.value,
             "raw_text": f.raw_text, "alt_value": f.alt_value, "page": f.page, "bbox": f.bbox, "band": f.band,
-            "needs_review": f.needs_review, "reason": f.review_reason, "status": f.status}
+            "needs_review": f.needs_review, "reason": f.review_reason, "status": f.status,
+            "suggested_value": f.suggested_value, "suggestion_reason": f.suggestion_reason, "evidence": f.evidence or []}
 
 
 @app.get("/api/documents/{doc_id}")
@@ -210,7 +211,8 @@ def get_document(doc_id: str, user: User = Depends(current_user), s: Session = D
             "fields": [_field_out(f) for f in d.fields],
             "checks": [{"id": c.check_id, "status": c.status, "severity": c.severity, "message": c.message,
                         "field_keys": c.field_keys} for c in checks],
-            "languages": d.languages, "handwriting": d.has_handwriting}
+            "languages": d.languages, "handwriting": d.has_handwriting, "evidence_summary": d.evidence_summary or {},
+            "parent_id": d.parent_id}
 
 
 @app.get("/api/documents/{doc_id}/pages/{page_no}")
@@ -511,6 +513,32 @@ def get_audit(limit: int = Query(200, le=1000), user: User = Depends(require("au
                      .limit(limit)).scalars()
     return {"events": [{"seq": e.seq, "ts": e.ts, "event": e.event, "actor_id": e.actor_id, "object_type": e.object_type,
                         "object_id": e.object_id, "meta": e.meta} for e in rows]}
+
+
+class CompanyIn(BaseModel):
+    own_gstins: list[str] = []
+
+
+@app.get("/api/admin/company")
+def get_company(user: User = Depends(require("user.manage")), s: Session = Depends(get_db)):
+    from sereno.masterdata import LEARN_OWN_AFTER
+    st = s.get(Tenant, user.tenant_id).settings or {}
+    learned = sorted(g for g, n in (st.get("buyer_gstin_counts") or {}).items() if n >= LEARN_OWN_AFTER)
+    return {"own_gstins": st.get("own_gstins", []), "learned_gstins": learned}
+
+
+@app.post("/api/admin/company")
+def set_company(body: CompanyIn, user: User = Depends(require("user.manage")), s: Session = Depends(get_db)):
+    from sereno.extraction.normalize import clean_code
+    from sereno.validation.gst import gstin_problem
+    gstins = sorted({clean_code(g) for g in body.own_gstins if g.strip()})
+    bad = [g for g in gstins if gstin_problem(g)]
+    if bad:
+        raise HTTPException(400, f"Not a valid GSTIN: {', '.join(bad)}")
+    t = s.get(Tenant, user.tenant_id)
+    t.settings = {**(t.settings or {}), "own_gstins": gstins}
+    audit.record("company.gstins_updated", session=s, tenant_id=t.id, actor_id=user.id, count=len(gstins))
+    return {"own_gstins": gstins}
 
 
 @app.get("/api/subprocessors")

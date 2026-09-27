@@ -1,7 +1,9 @@
 """Offline test of every stage that runs WITHOUT the model, on a labelled real dataset:
 
 1. Pre-check: quality signals, bucket, auto-corrections, unreadable gate, rotation hint.
-2. Validators on ground truth: on a correctly-read document every arithmetic/compliance check
+2. Machine-readable codes: decode every QR/barcode and compare what the code carries with the
+   labelled printed values (a mismatch is either a label error or a document edited after signing).
+3. Validators on ground truth: on a correctly-read document every arithmetic/compliance check
    should pass unless the document itself is inconsistent. A check failing on true values is a
    FALSE ALARM (costs reviewer time) unless the paper really is wrong; each failure is listed so
    a human can classify it.
@@ -17,8 +19,9 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from sereno.eval.run_eval import _items
+from sereno.extraction import codes
 from sereno.extraction.doc_specs import SPECS
-from sereno.extraction.normalize import normalise
+from sereno.extraction.normalize import normalise, values_agree
 from sereno.extraction.result import ExtractedDoc, FieldValue, line_key
 from sereno.ingest import loader, preprocess, quality
 from sereno.validation.checks import run_checks
@@ -49,6 +52,21 @@ def run(dataset: Path) -> dict:
         _, applied = preprocess.enhance(img, q0)
         reason = quality.unreadable_reason(q0, 1.0, 0.06, 5.0, 0.002)
         td = truth_doc(truth)
+        tc = time.monotonic()
+        readings = codes.read_codes([(i, pg.image) for i, pg in enumerate(doc.pages[:3])])
+        code_ms = int((time.monotonic() - tc) * 1000)
+        code_cmp = []
+        if td is not None:
+            spec_types = {f.name: f.type for f in td.spec.fields}
+            for r in readings:
+                for name, val in r.fields.items():
+                    if name in spec_types and td.v(name) is not None:
+                        code_cmp.append({"source": r.source, "field": name, "printed": str(td.v(name)), "code": str(val),
+                                         "agree": values_agree(spec_types[name], td.v(name), val)})
+            codes.apply_codes(td, readings)
+            if td.row_counts.get("qr") and truth.get("line_items"):
+                code_cmp.append({"source": "einvoice_qr", "field": "item_count", "printed": str(len(truth["line_items"])),
+                                 "code": str(td.row_counts["qr"]), "agree": td.row_counts["qr"] == len(truth["line_items"])})
         checks = run_checks(td) if td else []
         failed = [c for c in checks if c.failed and c.check_id != "required_fields"]
         rows.append({
@@ -57,6 +75,7 @@ def run(dataset: Path) -> dict:
             "unreadable_reason": reason, "rotation_hint": rot, "skew": q0.skew_deg, "char_h": round(q0.char_height_px, 1),
             "sharpness_norm": round(q0.sharpness_norm, 1), "text_contrast": round(q0.text_contrast, 2),
             "corrections": applied, "ms": int((time.monotonic() - t0) * 1000),
+            "codes": [r.source for r in readings], "code_ms": code_ms, "code_vs_print": code_cmp,
             "checks_run": sum(1 for c in checks if c.status != "skip"),
             "checks_failed_on_truth": [f"{c.check_id}: {c.message}" for c in failed]})
     by_bucket = defaultdict(list)
@@ -65,6 +84,9 @@ def run(dataset: Path) -> dict:
     summary = {b: {"docs": len(rs), "quality_buckets": dict(Counter(r["quality_bucket"] for r in rs)),
                    "refused_unreadable": sum(1 for r in rs if r["unreadable_reason"]),
                    "auto_corrected": sum(1 for r in rs if r["corrections"]),
+                   "docs_with_codes": sum(1 for r in rs if r["codes"]),
+                   "code_fields_compared": sum(len(r["code_vs_print"]) for r in rs),
+                   "code_fields_disagree": sum(1 for r in rs for c in r["code_vs_print"] if not c["agree"]),
                    "checks_run": sum(r["checks_run"] for r in rs),
                    "checks_failed_on_truth": sum(len(r["checks_failed_on_truth"]) for r in rs),
                    "mean_ms": round(sum(r["ms"] for r in rs) / len(rs))} for b, rs in sorted(by_bucket.items())}
@@ -83,6 +105,12 @@ def main():
         print(f"{r['bucket']:<12} {r['file']:<30} {r['size']:>10} q={r['quality_bucket']:<10} rot={r['rotation_hint']:<3} "
               f"skew={r['skew']:+5.1f} charH={r['char_h']:<5} sharpN={r['sharpness_norm']:<7} "
               f"fix={','.join(c.split(':')[0] for c in r['corrections']) or '-'}")
+        if r["codes"]:
+            ok = sum(1 for c in r["code_vs_print"] if c["agree"])
+            print(f"{'':12} CODES: {','.join(r['codes'])} ({r['code_ms']}ms) {ok}/{len(r['code_vs_print'])} fields match print")
+            for c in r["code_vs_print"]:
+                if not c["agree"]:
+                    print(f"{'':12}   PRINT != {c['source']}: {c['field']} printed={c['printed']} code={c['code']}")
         if r["unreadable_reason"]:
             print(f"{'':12} REFUSED: {r['unreadable_reason']}")
         for c in r["checks_failed_on_truth"]:

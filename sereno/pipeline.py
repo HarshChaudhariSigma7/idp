@@ -10,16 +10,20 @@ import time
 from dataclasses import dataclass
 from datetime import timedelta
 
-from sqlalchemy import func, select
+import threading
+
+from sqlalchemy import func, select, text
 
 from sereno import jobs
+from sereno import masterdata
 from sereno.config import get_settings
 from sereno.confidence.scorer import score_document
 from sereno.db import session_scope
-from sereno.extraction import extractor
+from sereno.extraction import codes, crossread, extractor, repair
 from sereno.extraction.doc_specs import SPECS, TRIAGE_SCHEMA, spec_with_extras
 from sereno.extraction.llm import LLMClient, LLMError, LLMRefusal, LLMResult, get_llm, image_block, text_block
 from sereno.extraction.prompts import PROMPT_VERSION, TRIAGE_SYSTEM
+from sereno.extraction.normalize import normalise, values_agree
 from sereno.extraction.result import ExtractedDoc
 from sereno.ingest import loader, preprocess, quality
 from sereno.models import (Document, ExtractedField, ExtractionRun, Page, Template, Tenant, ThresholdConfig, User,
@@ -29,9 +33,11 @@ from sereno.security import audit
 from sereno.security.crypto import pseudonymise
 from sereno.storage.temp_store import DOCS, EVAL, BlobGone, get_store
 from sereno.validation.checks import CheckResult, run_checks
+from sereno.validation.context import gstin_repairs
 
 log = logging.getLogger("sereno.pipeline")
 _DEVANAGARI = re.compile(r"[ऀ-ॿ]")
+_persist_lock = threading.Lock()
 VENDOR_FIELD = {"invoice": "supplier_gstin", "lr": "transporter_gstin", "po": "supplier_gstin",
                 "grn": "supplier_gstin", "contract": None}
 
@@ -133,9 +139,10 @@ def _enter_review(s, doc: Document, tenant: Tenant) -> None:
 
 def _triage(llm: LLMClient, pages: list[loader.LoadedPage], model: str) -> LLMResult:
     content = []
-    for p in pages[:6]:
+    edge = 1200 if len(pages) <= 6 else 700  # batch scans: every page, smaller, to find document boundaries
+    for p in pages[:40]:
         content.append(text_block(f"Page {p.page_no}:"))
-        content.append(image_block(loader.encode_jpeg(preprocess.fit_long_edge(p.image, 1200), 85), "image/jpeg"))
+        content.append(image_block(loader.encode_jpeg(preprocess.fit_long_edge(p.image, edge), 85), "image/jpeg"))
     content.append(text_block("Triage this document."))
     return llm.structured(pass_name="triage", model=model, system=TRIAGE_SYSTEM, content=content,
                           schema=TRIAGE_SCHEMA, max_tokens=4000, effort="low")
@@ -151,7 +158,7 @@ def process_document(document_id: str, llm: LLMClient | None = None) -> None:
         if doc is None or doc.status not in ("uploaded", "processing", "failed"):
             return
         doc.status, doc.status_message = "processing", "Reading document…"
-        tenant_id, declared = doc.tenant_id, doc.declared_type
+        tenant_id, declared, parent_id = doc.tenant_id, doc.declared_type, doc.parent_id
         # idempotent on retry: derived rows are rebuilt; extraction_runs are kept (they are the log)
         for model in (Page, ExtractedField, ValidationResult):
             s.query(model).filter(model.document_id == document_id).delete(synchronize_session=False)
@@ -174,7 +181,8 @@ def process_document(document_id: str, llm: LLMClient | None = None) -> None:
 
     # --- triage (type, rotation, languages, handwriting, issuer) --------------------------------
     triage = None
-    need_triage = declared == "auto" or not loaded.is_digital
+    # multi-page files always get triage: they may be batch scans of several documents
+    need_triage = declared == "auto" or not loaded.is_digital or (len(loaded.pages) > 1 and parent_id is None)
     if need_triage:
         try:
             tr = _triage(llm, loaded.pages, st.model_triage)
@@ -182,6 +190,11 @@ def process_document(document_id: str, llm: LLMClient | None = None) -> None:
             runs.append(("triage", tr, st.model_triage, None))
         except LLMError as e:
             runs.append(("triage", None, st.model_triage, str(e)))
+    groups = _document_groups(triage, len(loaded.pages))
+    if len(groups) > 1 and parent_id is None:
+        _persist_runs(document_id, runs)
+        _split_batch(document_id, raw, loaded.mime, groups)
+        return
     doc_type = declared if declared in SPECS else (triage or {}).get("document_type", "other")
     if doc_type not in SPECS:
         _persist_runs(document_id, runs)
@@ -259,12 +272,18 @@ def process_document(document_id: str, llm: LLMClient | None = None) -> None:
 
     spec = spec_with_extras(doc_type, extra_fields)
     langs = set((triage or {}).get("languages") or [])
-    clean = (bucket == "digital" and langs <= {"english"} and not (triage or {}).get("handwriting_present"))
+    handwriting = bool((triage or {}).get("handwriting_present"))
+    clean = (bucket == "digital" and langs <= {"english"} and not handwriting)
+    hard = bucket == "poor_scan" or handwriting or any(l not in ("english", "other") for l in langs)
     model = st.model_clean if clean else st.model_complex
+    effort = st.extraction_effort_hard if hard else None
+    # Machine-readable codes (signed e-invoice QR, UPI QR, barcodes): exact data, decoded locally
+    code_readings = codes.read_codes([(p.page_no, p.original) for p in prepared], st.einvoice_public_keys_pem)
 
     def attempt(model_name: str) -> tuple[ExtractedDoc, list[CheckResult], int]:
         nonlocal cost
-        a = extractor.run_primary(llm, spec, prepared, model_name, st.max_image_long_edge, template_hints)
+        a = extractor.run_primary(llm, spec, prepared, model_name, st.max_image_long_edge, template_hints,
+                                  effort=effort if model_name == st.model_complex else None)
         runs.append(("primary", a, model_name, None))
         cost += a.cost_usd
         d = extractor.parse_primary(spec, a.data)
@@ -273,8 +292,17 @@ def process_document(document_id: str, llm: LLMClient | None = None) -> None:
         cost += b.cost_usd
         disputed = extractor.apply_secondary(d, b.data)
         extractor.ground_in_text_layer(d, prepared)
+        d.anomalies += codes.apply_codes(d, code_readings)
         chk = run_checks(d, st.amount_tolerance_abs, st.amount_tolerance_rel)
         return d, chk, len(disputed)
+
+    def crop_read(fields: list) -> dict:
+        nonlocal cost
+        res, reads = crossread.run_crop_reads(llm, fields, prepared, st.model_complex)
+        if res is not None:
+            runs.append(("crop", res, st.model_complex, None))
+            cost += res.cost_usd
+        return reads
 
     try:
         doc_x, checks, n_disputed = attempt(model)
@@ -283,13 +311,45 @@ def process_document(document_id: str, llm: LLMClient | None = None) -> None:
             # Escalate: the cheaper model is only trusted when everything reconciles.
             doc_x, checks, n_disputed = attempt(st.model_complex)
             model = st.model_complex
+        # 1. Third, blind reading from zoomed crops; majority vote
         disputed = [f for f in doc_x.all_fields() if f.double_read and f.agreement is False]
+        crop_done: set[str] = set()
+        if st.crop_reads:
+            targets = _crop_targets(doc_x, disputed, hard)
+            if targets:
+                reads = crop_read(targets)
+                crop_done |= set(reads)
+                unresolved = crossread.apply_votes(doc_x, reads)
+                disputed = unresolved + [f for f in disputed if f.key not in reads]
+        # 2. Verifier only for disagreements voting could not settle
         if disputed:
             v = extractor.run_verifier(llm, doc_x, disputed, prepared, st.model_complex, st.max_image_long_edge)
             runs.append(("verify", v, st.model_complex, None))
             cost += v.cost_usd
             extractor.apply_verifier(doc_x, v.data)
-            checks = run_checks(doc_x, st.amount_tolerance_abs, st.amount_tolerance_rel)
+        checks = run_checks(doc_x, st.amount_tolerance_abs, st.amount_tolerance_rel)
+        # 3. Figures don't reconcile: zoomed re-read of the implicated numbers + arithmetic-guided repair
+        if st.arithmetic_repair and repair.failing_arithmetic(checks):
+            implicated = repair.implicated_numeric(doc_x, checks)
+            need = [f for f in implicated if f.key not in crop_done and f.bbox]
+            reread = crop_read(need) if (st.crop_reads and need) else {}
+            for key, (val, _raw, _leg) in reread.items():
+                doc_x.by_key()[key].third_value = val
+            evidence = {f.key: [(f.alt_value, "second reading"), (f.third_value, "zoomed re-read"),
+                                (f.code_value, "QR code")] for f in implicated}
+            backed, suggestion = repair.search(doc_x, checks, evidence, st.amount_tolerance_abs, st.amount_tolerance_rel)
+            repair.apply(doc_x, backed, suggestion)
+            repaired = {r.key for r in backed}
+            for key, (val, _raw, _leg) in reread.items():
+                fv = doc_x.by_key()[key]
+                if key not in repaired and val is not None and not values_agree(fv.spec.type, fv.value, val):
+                    fv.votes, fv.agreement = "2/3", False  # the zoomed re-read dissents: a person decides
+                    fv.alt_value = fv.alt_value if fv.alt_value is not None else val
+                    fv.evidence.append("zoomed re-read differs")
+            if not backed and reread and all(v is not None and values_agree(doc_x.by_key()[k].spec.type, doc_x.by_key()[k].value, v)
+                                             for k, (v, _r, _l) in reread.items()):
+                doc_x.anomalies.append("A zoomed re-read confirms the printed figures: the document itself doesn't add up. "
+                                       "Query the vendor before booking it.")
     except LLMRefusal as e:
         runs.append(("primary", None, model, str(e)))
         _persist_runs(document_id, runs)
@@ -307,7 +367,81 @@ def process_document(document_id: str, llm: LLMClient | None = None) -> None:
         return
 
     _persist_runs(document_id, runs)
-    _persist_extraction(document_id, doc_x, checks, model, cost, t0, unreadable)
+    _persist_extraction(document_id, doc_x, model, cost, t0, unreadable)
+
+
+def _crop_targets(doc_x: ExtractedDoc, disputed: list, hard: bool) -> list:
+    """Disputed fields first; on hard documents also every high-stakes value (header before lines)."""
+    out, seen = [], set()
+    pool = list(disputed) + ([f for f in doc_x.all_fields() if f.spec.high_stakes and f.value is not None] if hard else [])
+    for f in pool:
+        if f.key not in seen and f.bbox:
+            seen.add(f.key)
+            out.append(f)
+    return out[:crossread.MAX_CROPS]
+
+
+def _document_groups(triage: dict | None, n_pages: int) -> list[list[int]]:
+    """Page numbers per document from triage's document_index (contiguous runs, in page order)."""
+    if not triage or n_pages < 2:
+        return [list(range(1, n_pages + 1))]
+    idx = {p.get("page"): p.get("document_index") or 1 for p in triage.get("pages", [])}
+    groups: dict[int, list[int]] = {}
+    for page in range(1, n_pages + 1):
+        groups.setdefault(int(idx.get(page, 1)), []).append(page)
+    return [sorted(v) for _, v in sorted(groups.items())]
+
+
+def _subset(raw: bytes, mime: str, pages: list[int]) -> bytes:
+    import io
+
+    from PIL import Image
+    if mime == "application/pdf":
+        import pypdfium2 as pdfium
+        src, dst = pdfium.PdfDocument(raw), pdfium.PdfDocument.new()
+        dst.import_pages(src, [p - 1 for p in pages])
+        buf = io.BytesIO()
+        dst.save(buf)
+        dst.close()
+        src.close()
+        return buf.getvalue()
+    img = Image.open(io.BytesIO(raw))
+    frames = []
+    for p in pages:
+        img.seek(p - 1)
+        frames.append(img.convert("RGB").copy())
+    buf = io.BytesIO()
+    frames[0].save(buf, format="TIFF", save_all=True, append_images=frames[1:], compression="tiff_deflate")
+    return buf.getvalue()
+
+
+def _split_batch(document_id: str, raw: bytes, mime: str, groups: list[list[int]]) -> None:
+    """A batch scan holding several documents becomes one document per group of pages, each
+    processed, reviewed and exported on its own."""
+    child_ids = []
+    with session_scope() as s:
+        parent = s.get(Document, document_id)
+        name = str(parent.filename)
+        for k, pages in enumerate(groups, 1):
+            data = _subset(raw, mime, pages)
+            child = Document(tenant_id=parent.tenant_id, uploaded_by=parent.uploaded_by,
+                             filename=f"{name} (document {k} of {len(groups)}, pages {pages[0]}-{pages[-1]})"[:255],
+                             content_sha256=hashlib.sha256(data).hexdigest(),
+                             mime_type="application/pdf" if mime == "application/pdf" else "image/tiff",
+                             declared_type="auto", status="uploaded", parent_id=parent.id,
+                             blob_expires_at=parent.blob_expires_at)
+            s.add(child)
+            s.flush()
+            get_store().put(DOCS, child.id, "source", data, child.blob_expires_at)
+            jobs.enqueue(s, "process_document", {"document_id": child.id})
+            child_ids.append(child.id)
+        parent.status = "split"
+        parent.status_message = f"Batch scan split into {len(groups)} documents, each read separately"
+        parent.page_count = sum(len(g) for g in groups)
+        _shorten_retention(parent)
+        tid = parent.tenant_id
+    audit.record("document.split", tenant_id=tid, object_type="document", object_id=document_id,
+                 parts=len(groups), children=child_ids)
 
 
 def _persist_runs(document_id: str, runs) -> None:
@@ -317,15 +451,45 @@ def _persist_runs(document_id: str, runs) -> None:
     runs.clear()
 
 
-def _persist_extraction(document_id: str, doc_x: ExtractedDoc, checks: list[CheckResult], model: str, cost: float,
+def _suggest_from_checks(doc_x: ExtractedDoc, checks: list[CheckResult]) -> None:
+    """Turn check findings into ready-to-accept suggestions (still confirmed by a person)."""
+    by_key = doc_x.by_key()
+    for c in checks:
+        if not c.failed or not c.field_keys:
+            continue
+        fv = by_key.get(c.field_keys[0])
+        if fv is None or fv.suggested_value is not None or fv.repaired:
+            continue
+        if (c.details or {}).get("suggest"):
+            fv.suggested_value = normalise(fv.spec.type, c.details["suggest"])
+            fv.suggestion_reason = c.message
+        elif c.check_id.startswith("qr:"):
+            fv.suggested_value, fv.suggestion_reason = fv.code_value, "value encoded in the signed e-invoice QR"
+        elif c.check_id.startswith("format:") and fv.spec.type == "gstin":
+            options = gstin_repairs(fv.value)
+            if len(options) == 1:
+                fv.suggested_value = options[0]
+                fv.suggestion_reason = "the only valid GSTIN one look-alike character away from what was read"
+
+
+def _persist_extraction(document_id: str, doc_x: ExtractedDoc, model: str, cost: float,
                         t0: float, unreadable_pages: list) -> None:
     st = get_settings()
-    with session_scope() as s:
+    # Duplicate detection must see documents committed by parallel workers: the check and the save
+    # happen under one lock (per process; plus a Postgres advisory lock across processes).
+    with _persist_lock, session_scope() as s:
+        if s.bind.dialect.name == "postgresql":
+            s.execute(text("SELECT pg_advisory_xact_lock(424243)"))
         doc = s.get(Document, document_id)
         tenant = s.get(Tenant, doc.tenant_id)
         vf = VENDOR_FIELD.get(doc_x.spec.doc_type)
         if vf and doc_x.v(vf):
             doc.vendor_key = pseudonymise(doc_x.v(vf))
+        ctx, doc.dedupe_key = masterdata.build_context(s, tenant, doc_x, doc.id)
+        checks = run_checks(doc_x, st.amount_tolerance_abs, st.amount_tolerance_rel, ctx=ctx)
+        _suggest_from_checks(doc_x, checks)
+        for note in dict.fromkeys(doc_x.anomalies):
+            checks.append(CheckResult("note", "note", str(note)[:500], [], "warn"))
         auto, hs, weights = _thresholds(s, doc_x.spec.doc_type, tenant)
         hist = _history(s, doc.tenant_id, doc.vendor_key, doc_x.spec.doc_type)
         scores = score_document(doc_x, checks, doc.quality_bucket or "poor_scan", hist, auto, hs,
@@ -341,10 +505,12 @@ def _persist_extraction(document_id: str, doc_x: ExtractedDoc, checks: list[Chec
                 label=(f"Line {fv.line_index + 1} · {fv.spec.label}" if fv.line_index is not None else fv.spec.label),
                 group=fv.spec.group, line_index=fv.line_index, value_type=fv.spec.type, is_high_stakes=fv.spec.high_stakes,
                 value=fv.value, raw_text=fv.raw_text or None,
-                alt_value=fv.alt_value if fv.agreement is False else None,
+                alt_value=fv.alt_value if (fv.agreement is False or fv.code_agrees is False or fv.repaired) else None,
                 page=fv.page, bbox=fv.bbox, score=sc.score, band=sc.band, needs_review=sc.needs_review,
                 review_reason=sc.reason, reason_codes=sc.reason_codes, features=sc.features,
-                status="pending" if sc.needs_review else "auto", final_value=None))
+                status="pending" if sc.needs_review else "auto", final_value=None,
+                suggested_value=fv.suggested_value, suggestion_reason=fv.suggestion_reason,
+                evidence=list(dict.fromkeys(fv.evidence)) or None))
             if sc.needs_review:
                 flagged_labels.append(f"{fv.spec.label} (line {fv.line_index + 1})" if fv.line_index is not None else fv.spec.label)
         if unreadable_pages:
@@ -359,6 +525,19 @@ def _persist_extraction(document_id: str, doc_x: ExtractedDoc, checks: list[Chec
         doc.processed_at = utcnow()
         doc.processing_ms = int((time.monotonic() - t0) * 1000)
         doc.cost_usd = round(cost, 4)
+        allf = doc_x.all_fields()
+        doc.evidence_summary = {
+            "codes": sorted({r.source for r in doc_x.codes}),
+            "qr_confirmed": sum(1 for f in allf if f.code_agrees and not f.code_filled),
+            "qr_filled": sum(1 for f in allf if f.code_filled),
+            "qr_mismatch": sum(1 for f in allf if f.code_agrees is False),
+            "votes_3of3": sum(1 for f in allf if f.votes == "3/3"),
+            "votes_split": sum(1 for f in allf if f.votes in ("2/3", "1/1/1")),
+            "repaired": sum(1 for f in allf if f.repaired),
+            "suggestions": sum(1 for f in allf if f.suggested_value is not None),
+            "master_matches": sum(1 for f in allf if f.master_match),
+            "duplicates": len(ctx.duplicates),
+        }
         failed = [c for c in checks if c.failed]
         if doc.fields_flagged or unreadable_pages:
             doc.status = "needs_review"
@@ -374,6 +553,9 @@ def _persist_extraction(document_id: str, doc_x: ExtractedDoc, checks: list[Chec
                 _enter_review(s, doc, tenant)
             else:
                 _shorten_retention(doc)
+            s.flush()
+            s.expire(doc, ["fields"])
+            masterdata.learn(s, doc)
         if tenant.eval_retention_opt_in:
             try:
                 raw = get_store().get(DOCS, doc.id, "source")

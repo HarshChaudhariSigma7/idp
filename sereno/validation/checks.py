@@ -2,6 +2,7 @@
 Every failed check names the fields it implicates and explains itself in plain language."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
@@ -62,7 +63,15 @@ class Tol:
 LINE_TOL = Decimal("0.51")
 
 
-def run_checks(doc: ExtractedDoc, abs_tol: float = 1.0, rel_tol: float = 0.00002) -> list[CheckResult]:
+def _per_factor(per) -> Decimal:
+    m = re.match(r"\s*(\d+)", str(per or ""))
+    return Decimal(m.group(1)) if m and int(m.group(1)) > 1 else Decimal(1)
+
+
+def run_checks(doc: ExtractedDoc, abs_tol: float = 1.0, rel_tol: float = 0.00002, ctx=None) -> list[CheckResult]:
+    """ctx: optional validation.context.CheckContext (company master data, vendor history,
+    duplicates). Without it only document-internal checks run."""
+    from sereno.validation import context as cx
     tol = Tol(abs_tol, rel_tol)
     checks = [_required(doc)]
     dt = doc.spec.doc_type
@@ -77,6 +86,9 @@ def run_checks(doc: ExtractedDoc, abs_tol: float = 1.0, rel_tol: float = 0.00002
     elif dt == "contract":
         checks += _contract(doc)
     checks += _formats(doc)
+    checks += cx.code_checks(doc) + cx.fy_checks(doc) + cx.row_count_checks(doc)
+    if ctx is not None:
+        checks += cx.master_checks(doc, ctx)
     return [c for c in checks if c is not None]
 
 
@@ -150,6 +162,10 @@ def _invoice(doc: ExtractedDoc, tol: Tol) -> list[CheckResult]:
         if qty is not None and rate is not None and taxable is not None:
             calc = qty * rate - disc
             ok = abs(calc - taxable) <= max(LINE_TOL, abs(taxable) * Decimal("0.0005"))
+            per = _per_factor(ln["rate_per"].value if "rate_per" in ln else None)
+            if not ok and per > 1:  # "Rate 450 per 100 NOS" (Tally's 'per' column)
+                calc = qty * rate / per - disc
+                ok = abs(calc - taxable) <= max(LINE_TOL, abs(taxable) * Decimal("0.0005"))
             out.append(CheckResult(f"line_math:{i}", "pass" if ok else "fail",
                                    f"Line {i + 1}: quantity × rate {'matches' if ok else 'does not match'} the line amount"
                                    + ("" if ok else f" ({qty} × {rate} = {_inr(calc)} but line shows {_inr(taxable)})"),
@@ -340,6 +356,15 @@ def _lr(doc: ExtractedDoc, tol: Tol) -> list[CheckResult]:
                                "Basic freight + other charges = total freight" if ok else
                                f"Basic freight + other charges comes to {_inr(calc)} but total shows {_inr(total)}",
                                ["total_freight", "freight_amount", "other_charges"]))
+    words = doc.v("amount_in_words")
+    if words and total is not None:
+        w = words_to_amount(words)
+        if w is not None:
+            ok = abs(w - total) < 1
+            out.append(CheckResult("amount_in_words", "pass" if ok else "fail",
+                                   "Amount in words matches the total freight" if ok else
+                                   f"Amount in words says {_inr(w)} but total freight shows {_inr(total)}",
+                                   ["amount_in_words", "total_freight"]))
     c1, c2 = doc.v("consignor_gstin"), doc.v("consignee_gstin")
     if c1 and c2 and c1 == c2:
         out.append(CheckResult("gstin_distinct", "fail", "Consignor and consignee GSTIN are identical; check both boxes",

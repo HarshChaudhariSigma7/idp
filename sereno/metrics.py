@@ -209,16 +209,16 @@ def _vernacular(d: Document) -> bool:
 
 CONDITIONS = [
     ("overall", "Overall accuracy", lambda d: True,
-     ["Two independent AI readings of every field", "Every figure re-checked by GST & arithmetic rules",
-      "Confidence from evidence, not model self-report"]),
+     ["Two independent AI readings, a third on zoomed crops when they differ", "Signed GST e-invoice QR read as exact ground truth",
+      "Arithmetic repairs misreads only when another reading backs the fix"]),
     ("printed", "Printed & digital", lambda d: not _vernacular(d) and not d.has_handwriting,
-     ["PDF text-layer cross-check on digital files", "Deskew, upscale and contrast repair on scans",
-      "GSTIN checksum, HSN, e-way and IRN validation"]),
+     ["PDF text-layer cross-check on digital files", "Printed values checked against the signed e-invoice QR",
+      "GSTIN checksum, HSN, e-way, IRN and financial-year validation"]),
     ("vernacular", "Vernacular", _vernacular,
-     ["Devanagari & regional script reading, strongest model only", "Indic numerals (०-९) normalised in tested code",
-      "Bilingual label dictionary for LRs, bilty & challans"]),
+     ["Devanagari & regional script reading, strongest model only", "Indic numerals in every script and Hindi/Marathi months normalised",
+      "Hindi amount-in-words checked against the figures"]),
     ("handwritten", "Handwritten", lambda d: bool(d.has_handwriting),
-     ["Zoomed re-read on original pixels", "Verifier resolves every disagreement, then a person confirms",
+     ["Three blind readings (page, strips, zoomed crop), majority vote", "Rate-per-unit and row-count checks catch missed lines",
       "Unreadable pages refused before any guess"]),
 ]
 
@@ -289,8 +289,19 @@ def technology(s, tenant_id: str, docs: list[Document]) -> list[dict]:
     human = sum(1 for _, _, st in feats if st in ("confirmed", "corrected"))
     checks = s.execute(select(ValidationResult.status).where(ValidationResult.document_id.in_(ids),
                                                              ValidationResult.stage == "extracted")).scalars().all()
-    verify = s.execute(select(func.count()).select_from(ExtractionRun).where(ExtractionRun.document_id.in_(ids),
-                                                                             ExtractionRun.pass_name == "verify")).scalar() or 0
+    runs = Counter(s.execute(select(ExtractionRun.pass_name).where(ExtractionRun.document_id.in_(ids),
+                                                                   ExtractionRun.pass_name.in_(("verify", "crop"))))
+                   .scalars().all())
+    ev: Counter = Counter()
+    for d in docs:
+        for k, v in (d.evidence_summary or {}).items():
+            if isinstance(v, int):
+                ev[k] += v
+    with_codes = sum(1 for d in docs if (d.evidence_summary or {}).get("codes"))
+    context = Counter(s.execute(select(ValidationResult.check_id).where(
+        ValidationResult.document_id.in_(ids), ValidationResult.stage == "extracted",
+        ValidationResult.check_id.in_(("duplicate", "vendor_bank_changed", "own_gstin")),
+        ValidationResult.status.in_(("fail", "warn")))).scalars().all())
     models = Counter((d.model_used or "").replace("claude-", "") for d in docs if d.model_used)
     ms = sorted(c.time_on_field_ms for c in s.execute(select(Correction).where(Correction.document_id.in_(ids))).scalars()
                 if c.time_on_field_ms)
@@ -301,13 +312,21 @@ def technology(s, tenant_id: str, docs: list[Document]) -> list[dict]:
          "detail": f"{sum(1 for d in docs if d.status == 'unreadable')} refused as unreadable instead of guessed"},
         {"step": "Auto-correction", "value": sum(corr.values()), "unit": "fixes applied",
          "detail": ", ".join(f"{v} {k}" for k, v in corr.most_common(4)) or "none needed"},
-        {"step": "Dual independent reading", "value": double, "unit": "fields read twice",
-         "detail": " · ".join(f"{v} {k}" for k, v in models.most_common()) or ""},
-        {"step": "Disagreement verifier", "value": disagree, "unit": "disagreements caught",
-         "detail": f"resolved on zoomed crops in {verify} document(s), then sent to a person"},
+        {"step": "Machine-readable codes", "value": ev["qr_confirmed"] + ev["qr_filled"], "unit": "fields proven by QR/barcode",
+         "detail": f"{with_codes} document(s) carried a code · {ev['qr_filled']} filled where print was unreadable · "
+                   f"{ev['qr_mismatch']} print-vs-QR mismatches flagged"},
+        {"step": "Independent readings", "value": double, "unit": "fields read twice",
+         "detail": f"{ev['votes_3of3']} confirmed 3 of 3 on zoomed crops · " +
+                   (" · ".join(f"{v} {k}" for k, v in models.most_common()) or "")},
+        {"step": "Disagreement resolution", "value": disagree, "unit": "disagreements caught",
+         "detail": f"{ev['votes_split']} settled by a third reading, {runs['verify']} by a verifier; all shown to a person"},
         {"step": "GST & arithmetic checks", "value": len(checks), "unit": "checks run",
-         "detail": f"{sum(1 for c in checks if c == 'fail')} mismatches stopped before export"},
+         "detail": f"{sum(1 for c in checks if c == 'fail')} mismatches stopped · {ev['repaired']} misreads repaired "
+                   f"from evidence · {ev['suggestions']} suggestions"},
+        {"step": "Company records", "value": ev["master_matches"] + sum(context.values()), "unit": "record checks hit",
+         "detail": f"{context['duplicate']} duplicates blocked · {context['vendor_bank_changed']} bank-change alerts · "
+                   f"{ev['master_matches']} matched your GSTINs/vendors"},
         {"step": "Human confirmation", "value": human, "unit": "fields confirmed by people",
-         "detail": (f"median {round(ms[len(ms) // 2] / 1000, 1)}s per field" if ms else "") +
+         "detail": (f"median {round(ms[len(ms) // 2] / 1000, 1)}s per field" if ms else "no reviews yet") +
                    (f" · {templates} vendor template(s) active" if templates else "")},
     ]

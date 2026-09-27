@@ -8,12 +8,16 @@ import re
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
-_DEVANAGARI = str.maketrans("०१२३४५६७८९", "0123456789")
-_OTHER_DIGITS = str.maketrans("૦૧૨૩૪૫૬૭૮૯০১২৩৪৫৬৭৮৯", "01234567890123456789")  # Gujarati, Bengali
+# Every Indic digit block we meet on Indian business documents -> ASCII 0-9.
+_INDIC_ZEROS = {
+    0x0966: "Devanagari (Hindi, Marathi, Nepali)", 0x09E6: "Bengali/Assamese", 0x0A66: "Gurmukhi (Punjabi)",
+    0x0AE6: "Gujarati", 0x0B66: "Odia", 0x0BE6: "Tamil", 0x0C66: "Telugu", 0x0CE6: "Kannada", 0x0D66: "Malayalam",
+}
+_DIGITS = str.maketrans({chr(z + i): str(i) for z in _INDIC_ZEROS for i in range(10)})
 
 
 def fold_digits(s: str) -> str:
-    return s.translate(_DEVANAGARI).translate(_OTHER_DIGITS)
+    return s.translate(_DIGITS)
 
 
 _CURRENCY = re.compile(r"(₹|rs\.?|inr|rupees?|/-|\bonly\b)", re.I)
@@ -71,6 +75,21 @@ def parse_percent(s: str | None) -> Decimal | None:
 
 _MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+# Hindi and Marathi month names (with common spelling variants), normalised without nukta/chandrabindu
+_INDIC_MONTHS = {
+    "जनवरी": 1, "जानेवारी": 1, "फरवरी": 2, "फेब्रुवारी": 2, "मार्च": 3, "अप्रैल": 4, "अप्रेल": 4, "एप्रिल": 4,
+    "मई": 5, "मे": 5, "जून": 6, "जुलाई": 7, "जुलै": 7, "अगस्त": 8, "ऑगस्ट": 8, "अगस्ट": 8,
+    "सितंबर": 9, "सितम्बर": 9, "सप्टेंबर": 9, "अक्टूबर": 10, "अक्तूबर": 10, "ऑक्टोबर": 10,
+    "नवंबर": 11, "नवम्बर": 11, "नोव्हेंबर": 11, "दिसंबर": 12, "दिसम्बर": 12, "डिसेंबर": 12,
+}
+
+
+def devanagari_key(t: str) -> str:
+    """Spelling-tolerant key: drop nukta, fold chandrabindu into anusvara."""
+    return t.replace("\u093c", "").replace("\u0901", "\u0902").strip()
+
+
+_INDIC_MONTHS = {devanagari_key(k): v for k, v in _INDIC_MONTHS.items()}
 
 
 def parse_date(s: str | None) -> date | None:
@@ -92,6 +111,9 @@ def parse_date(s: str | None) -> date | None:
     m = re.fullmatch(r"([a-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?\s+(\d{4})", t)
     if m and m[1][:3] in _MONTHS:
         return _mk(int(m[3]), _MONTHS[m[1][:3]], int(m[2]))
+    m = re.fullmatch(r"(\d{1,2})\s*[\-/ .,]?\s*([\u0900-\u097f]+)\s*[\-/ .,]?\s*(\d{2,4})", t)
+    if m and devanagari_key(m[2]) in _INDIC_MONTHS:  # "5 जून 2025", "05-जुलै-25"
+        return _mk(_year(m[3]), _INDIC_MONTHS[devanagari_key(m[2])], int(m[1]))
     return None
 
 
@@ -167,7 +189,7 @@ def raw_consistent(ftype: str, value, raw_text: str | None) -> bool | None:
     if ftype in ("number", "percent", "integer"):
         rv = parse_percent(raw_text) if ftype == "percent" else parse_amount(raw_text)
         if rv is None:
-            m = re.search(r"[\d०-९][\d०-९,]*(?:\.[\d०-९]+)?", raw_text)
+            m = re.search(r"\d[\d,]*(?:\.\d+)?", fold_digits(raw_text))
             rv = parse_amount(m.group(0)) if m else None
         if rv is None:
             return None
@@ -182,3 +204,8 @@ def raw_consistent(ftype: str, value, raw_text: str | None) -> bool | None:
 
 def today() -> date:
     return datetime.now().date()
+
+
+def shape_mask(s: str | None) -> str:
+    """Shape of a value without its content: INV/24-25/0123 -> AAA/99-99/9999."""
+    return re.sub(r"[A-Za-z]", "A", re.sub(r"\d", "9", fold_digits(str(s or ""))))[:40]

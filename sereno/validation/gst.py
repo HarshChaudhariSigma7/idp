@@ -98,9 +98,57 @@ def _words_to_int(words: list[str]) -> int | None:
     return total + current if seen else None
 
 
+# Hindi numbers 1-99 are irregular words, so each one is listed.
+_HI_1_99 = (
+    "एक दो तीन चार पांच छह सात आठ नौ दस ग्यारह बारह तेरह चौदह पंद्रह सोलह सत्रह अठारह उन्नीस बीस "
+    "इक्कीस बाईस तेईस चौबीस पच्चीस छब्बीस सत्ताईस अट्ठाईस उनतीस तीस इकतीस बत्तीस तैंतीस चौंतीस पैंतीस "
+    "छत्तीस सैंतीस अड़तीस उनतालीस चालीस इकतालीस बयालीस तैंतालीस चौवालीस पैंतालीस छियालीस सैंतालीस "
+    "अड़तालीस उनचास पचास इक्यावन बावन तिरेपन चौवन पचपन छप्पन सत्तावन अट्ठावन उनसठ साठ इकसठ बासठ "
+    "तिरेसठ चौंसठ पैंसठ छियासठ सड़सठ अड़सठ उनहत्तर सत्तर इकहत्तर बहत्तर तिहत्तर चौहत्तर पचहत्तर "
+    "छिहत्तर सतहत्तर अठहत्तर उन्यासी अस्सी इक्यासी बयासी तिरासी चौरासी पचासी छियासी सत्तासी "
+    "अट्ठासी नवासी नब्बे इक्यानवे बानवे तिरानवे चौरानवे पचानवे छियानवे सत्तानवे अट्ठानवे निन्यानवे").split()
+_HI_VARIANTS = {"पाँच": 5, "छः": 6, "छ": 6, "पन्द्रह": 15, "चौवन": 54, "उन्नासी": 79, "तिरपन": 53,
+                "सड़सठ": 67, "सरसठ": 67, "उनासी": 79, "इकतिस": 31, "बाइस": 22, "तेइस": 23}
+_HI_SCALES = {"सौ": 100, "हजार": 1_000, "हज़ार": 1_000, "लाख": 100_000, "करोड़": 10_000_000, "करोड": 10_000_000}
+_HI_SKIP = {"रुपये", "रुपए", "रुपया", "रु", "और", "मात्र", "केवल", "सिर्फ", "भारतीय", "का", "की"}
+
+
+def _dkey(t: str) -> str:
+    return t.replace("\u093c", "").replace("\u0901", "\u0902").strip("।.,:- ")
+
+
+_HI_WORDS = {_dkey(w): i for i, w in enumerate(_HI_1_99, 1)}
+_HI_WORDS.update({_dkey(k): v for k, v in _HI_VARIANTS.items()})
+_HI_SCALE_KEYS = {_dkey(k): v for k, v in _HI_SCALES.items()}
+_HI_SKIP_KEYS = {_dkey(k) for k in _HI_SKIP}
+
+
+def hindi_words_to_amount(text: str) -> Decimal | None:
+    """Whole-rupee Hindi number words: 'एक लाख तेईस हज़ार चार सौ छप्पन रुपये मात्र' -> 123456."""
+    words = [_dkey(w) for w in re.split(r"[\s,।]+", text) if _dkey(w)]
+    total, current, seen = 0, 0, False
+    for w in words:
+        if w in _HI_WORDS:
+            current += _HI_WORDS[w]
+            seen = True
+        elif w in _HI_SCALE_KEYS:
+            scale = _HI_SCALE_KEYS[w]
+            if scale == 100:
+                current = max(current, 1) * 100
+            else:
+                total += max(current, 1) * scale
+                current = 0
+            seen = True
+        elif w not in _HI_SKIP_KEYS:
+            return None  # unknown word (e.g. Marathi numerals): do not guess
+    return Decimal(total + current) if seen else None
+
+
 def words_to_amount(text: str | None) -> Decimal | None:
     if not text:
         return None
+    if re.search(r"[\u0900-\u097f]", str(text)):
+        return _hindi_amount(str(text))
     t = re.sub(r"[^a-z ]", " ", str(text).lower().replace("-", " "))
     t = re.sub(r"\s+", " ", t).strip()
     if not t:
@@ -120,3 +168,18 @@ def words_to_amount(text: str | None) -> Decimal | None:
     if paise is None:
         return None
     return Decimal(rupees) + Decimal(paise) / 100
+
+
+def _hindi_amount(text: str) -> Decimal | None:
+    words = [_dkey(w) for w in re.split(r"[\s,।]+", text) if _dkey(w)]
+    if any(w in ("पैसे", "पैसा") for w in words):
+        split = next((i for i, w in enumerate(words) if w in ("रुपये", "रुपए", "रुपया", "और")), None)
+        if split is None:
+            return None
+        rupees = hindi_words_to_amount(" ".join(words[:split])) if split else Decimal(0)
+        tail = [w for w in words[split + 1:] if w not in ("पैसे", "पैसा", "और")]
+        paise = hindi_words_to_amount(" ".join(tail)) if tail else Decimal(0)
+        if rupees is None or paise is None:
+            return None
+        return rupees + paise / 100
+    return hindi_words_to_amount(text)

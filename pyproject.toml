@@ -23,6 +23,7 @@ dependencies = [
   "rapidfuzz>=3.9",
   "openpyxl>=3.1",
   "psycopg2-binary>=2.9",
+  "zxing-cpp>=2.2",
 ]
 
 [project.optional-dependencies]

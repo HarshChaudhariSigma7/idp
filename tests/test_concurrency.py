@@ -37,13 +37,19 @@ def test_parallel_eval_path_with_worker_threads(tmp_path, monkeypatch):
     monkeypatch.setenv("SERENO_WORKER_THREADS", "3")
     rep = run_eval.run(tmp_path / "ds", tmp_path / "out", fake=False, workers=3, timeout_s=240)
     assert rep["overall"]["documents"] == 6
-    assert all(d["status"] == "ready" for d in rep["documents"]), [d["status"] for d in rep["documents"]]
+    # six copies of one invoice processed in parallel: exactly one is accepted, five are caught as
+    # duplicates even though the workers ran at the same time
+    statuses = sorted(d["status"] for d in rep["documents"])
+    assert statuses == ["needs_review"] * 5 + ["ready"], statuses
     assert rep["overall"]["field_accuracy_pct"] == 100.0
 
     from sereno.db import session_scope
     from sereno.models import Document, ExtractedField, Page
     from sereno.security.audit import verify_chain
+    from sereno.models import ValidationResult
     with session_scope() as s:
+        dups = s.query(ValidationResult).filter(ValidationResult.check_id == "duplicate", ValidationResult.status == "fail").count()
+        assert dups == 5
         for d in s.query(Document).all():
             assert s.query(Page).filter(Page.document_id == d.id).count() == 1
             assert s.query(ExtractedField).filter(ExtractedField.document_id == d.id).count() == d.fields_total

@@ -22,7 +22,10 @@ Redact nothing on the image (it changes difficulty); store under `eval_data/` (g
 `bash datasets/web_v1/fetch.sh` downloads 25 real public documents with labels. Run
 `python -m sereno.eval.offline_checks eval_data/web/labelled` (no key) and
 `python -m sereno.eval.run_eval eval_data/web/labelled --out reports/web_v1` (with key).
-It is a regression set, not a benchmark.
+Offline checks also decode every QR/barcode and compare it with the labels: on the current set
+the Tally e-invoice QR matches its print 7/7, UPI amounts match, and one public e-invoice sample
+has printed GSTINs that differ from its signed QR (an edited sample: exactly the tamper case the
+product flags). It is a regression set, not a benchmark.
 
 ## 2. Label
 
@@ -61,6 +64,8 @@ page to show which cells are demo-safe).
 | straight-through docs | docs needing no review | the CFO number |
 | unreadable/failed | refused by the quality gate | should match human judgement |
 | mean seconds / cost | latency and model cost per doc | unit economics |
+| code agreement | printed fields that match the e-invoice QR | free ground truth on every e-invoice |
+| repair precision | automatic repairs that a reviewer kept | must stay ~100% or repair turns to suggest-only |
 
 ## 5. Gate (in `sereno/eval/run_eval.py::GATE`)
 

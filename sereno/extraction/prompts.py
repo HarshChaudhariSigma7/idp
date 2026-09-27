@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from sereno.extraction.doc_specs import DocSpec
 
-PROMPT_VERSION = "2026-09-27.1"
+PROMPT_VERSION = "2026-09-28.1"
 
 _COMMON_RULES = """\
 Rules that always apply:
@@ -91,6 +91,11 @@ whether the page is legible. Identify the document type:
 List every language/script present and whether any handwriting is present (including handwritten
 figures on a printed form). issuer_gstin: the GSTIN of the party that issued the document (vendor
 on an invoice, transporter on an LR, buyer on a PO), uppercase without spaces, "" if none visible.
+document_index: files are often batch scans holding several separate documents. Number the
+documents in the file 1, 2, 3... and give each page the number of the document it belongs to.
+Continuation pages, annexures and terms pages belong to the document they continue. A new
+document starts where a new invoice number / LR number / PO number begins. A single document
+means every page is 1.
 """
 
 

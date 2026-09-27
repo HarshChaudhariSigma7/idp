@@ -10,6 +10,7 @@ from collections import Counter, defaultdict
 
 from sqlalchemy import select
 
+from sereno.extraction.normalize import shape_mask
 from sereno.models import Document, Template
 from sereno.review import effective_value
 from sereno.security import audit
@@ -22,8 +23,7 @@ class TemplateError(ValueError):
 
 
 def _mask(s: str) -> str:
-    """Shape of a value without its content: INV/24-25/0123 -> AAA/99-99/9999."""
-    return re.sub(r"[A-Za-z]", "A", re.sub(r"\d", "9", s))[:40]
+    return shape_mask(s)
 
 
 def _where(x: float, y: float) -> str:

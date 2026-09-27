@@ -99,6 +99,10 @@ class Document(Base):
     exported_at: Mapped[datetime | None] = mapped_column(DateTime)
     blob_expires_at: Mapped[datetime | None] = mapped_column(DateTime)
     blob_purged_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # HMAC(issuer GSTIN | document number): finds duplicates without storing either in clear
+    dedupe_key: Mapped[str | None] = mapped_column(String(64), index=True)
+    parent_id: Mapped[str | None] = mapped_column(String(36), index=True)  # set on documents split from a batch PDF
+    evidence_summary: Mapped[dict | None] = mapped_column(JSON)  # counts: qr fields, 3/3 votes, repairs ...
 
     pages: Mapped[list["Page"]] = relationship(back_populates="document", cascade="all, delete-orphan",
                                                order_by="Page.page_no")
@@ -163,6 +167,9 @@ class ExtractedField(Base):
     features: Mapped[dict | None] = mapped_column(JSON)  # numeric signals used for scoring (backtest input)
     status: Mapped[str] = mapped_column(String(16), default="auto")  # auto | pending | confirmed | corrected
     final_value: Mapped[object | None] = mapped_column(EncryptedJSON)
+    suggested_value: Mapped[object | None] = mapped_column(EncryptedJSON)
+    suggestion_reason: Mapped[str | None] = mapped_column(Text)
+    evidence: Mapped[list | None] = mapped_column(JSON)  # plain tags: "matches e-invoice QR", "3 of 3 readings agree"
     document: Mapped[Document] = relationship(back_populates="fields")
 
 
@@ -279,3 +286,18 @@ class ThresholdConfig(Base):
     evidence: Mapped[dict] = mapped_column(JSON)  # sample sizes, escape rates at chosen point
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class VendorProfile(Base):
+    """What a vendor's reviewed documents have looked like: the baseline for spotting misread
+    GSTINs, unusual invoice-number formats and changed bank accounts (a classic fraud pattern)."""
+    __tablename__ = "vendor_profiles"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True)
+    vendor_key: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[str | None] = mapped_column(EncryptedJSON)
+    bank_account: Mapped[str | None] = mapped_column(EncryptedJSON)
+    invoice_masks: Mapped[dict] = mapped_column(JSON, default=dict)
+    docs: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    __table_args__ = (Index("ix_vendor_profile_lookup", "tenant_id", "vendor_key", unique=True),)

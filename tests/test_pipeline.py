@@ -58,34 +58,59 @@ def test_scan_uses_strong_model_and_routes_only_the_disputed_field(tenant_and_us
     doc_id, llm = run(sd, tenant_and_users, errors={"primary": {"line_items[1].quantity": wrong}})
     d = doc_of(doc_id)
     assert d.model_used == "claude-opus-5"
-    assert [c["pass"] for c in llm.calls] == ["triage", "primary", "secondary", "verify"]
+    # the disagreement is settled by a blind third read of a zoomed crop, not by the verifier
+    assert [c["pass"] for c in llm.calls] == ["triage", "primary", "secondary", "crop"]
     f = fields_of(doc_id)
     q = f["line_items[1].quantity"]
-    # verifier restores the right value, but the field still goes to a human
+    # 2 of 3 readings restore the right value, but the field still goes to a human
     assert q.value == sd.lines[1]["quantity"] and q.needs_review and q.band == "low"
     assert d.status == "needs_review"
-    assert "Two independent readings differ" in q.review_reason
+    assert "2 of 3 independent readings" in q.review_reason
+    assert "2 of 3 readings agree" in (q.evidence or [])
     # fields that both passes agreed on and that reconcile stay auto-accepted
     assert not f["invoice_number"].needs_review
     assert [k for k, x in f.items() if x.needs_review] == ["line_items[1].quantity"], _debug_flags(doc_id)
     assert d.review_due_at is not None and d.assigned_to is not None
 
 
-def test_arithmetic_failure_penalises_whole_document(tenant_and_users):
+def test_correlated_misread_is_repaired_from_zoomed_reread(tenant_and_users):
     sd = make_invoice(random.Random(12), "good_scan")
     bad_total = sd.truth["grand_total"] + 1000
-    # both passes misread identically => self-consistency can't catch it, arithmetic must
+    # both passes misread identically => self-consistency can't catch it; the arithmetic fails,
+    # the zoomed re-read sees the true total, and the repair makes every equation balance
+    doc_id, llm = run(sd, tenant_and_users, errors={"primary": {"grand_total": bad_total},
+                                                     "secondary": {"grand_total": bad_total}})
+    d = doc_of(doc_id)
+    f = fields_of(doc_id)
+    assert "crop" in [c["pass"] for c in llm.calls]
+    gt = f["grand_total"]
+    assert gt.value == sd.truth["grand_total"] and gt.alt_value == bad_total
+    assert gt.needs_review and "Corrected from" in gt.review_reason  # a person still confirms
+    assert d.status == "needs_review" and d.arithmetic_ok
+    assert [k for k, x in f.items() if x.needs_review] == ["grand_total"]  # not 11 fields any more
+
+
+def test_document_that_really_does_not_add_up(tenant_and_users):
+    sd = make_invoice(random.Random(13), "good_scan")
+    bad_total = sd.truth["grand_total"] + 1000
+    # the zoomed re-read ALSO sees the bad total: the paper itself is wrong -> say so, don't "fix" it
     doc_id, _ = run(sd, tenant_and_users, errors={"primary": {"grand_total": bad_total},
-                                                   "secondary": {"grand_total": bad_total}})
+                                                   "secondary": {"grand_total": bad_total},
+                                                   "crop": {"grand_total": bad_total}})
     d = doc_of(doc_id)
     f = fields_of(doc_id)
     assert d.status == "needs_review" and not d.arithmetic_ok
-    assert f["grand_total"].needs_review
+    assert f["grand_total"].value == bad_total and f["grand_total"].needs_review
     assert "total" in d.status_message
+    with session_scope() as s:
+        from sereno.models import ValidationResult
+        notes = [v.message for v in s.query(ValidationResult).filter(ValidationResult.document_id == doc_id,
+                                                                    ValidationResult.status == "note")]
+    assert any("document itself doesn't add up" in n for n in notes)
     clean = make_invoice(random.Random(99), "good_scan")
     doc2, _ = run(clean, tenant_and_users)
     f2 = fields_of(doc2)
-    # same field on a reconciling doc scores higher than on the failing doc
+    # whole-document penalty: the same field scores lower on the document that doesn't add up
     assert f2["invoice_number"].score > f["invoice_number"].score
 
 
@@ -112,7 +137,9 @@ def test_bilingual_lr_routes_to_opus_and_extracts(tenant_and_users):
 def test_review_flow_logs_corrections_and_updates_vendor_history(tenant_and_users):
     tid, users = tenant_and_users
     sd = make_invoice(random.Random(15), "good_scan")
-    doc_id, _ = run(sd, tenant_and_users, errors={"primary": {"line_items[0].rate": 1.0}, "secondary": {"line_items[0].rate": 1.0}})
+    # all three readings agree on the wrong rate, so only a person can fix it
+    doc_id, _ = run(sd, tenant_and_users, errors={"primary": {"line_items[0].rate": 1.0}, "secondary": {"line_items[0].rate": 1.0},
+                                                   "crop": {"line_items[0].rate": 1.0}})
     with session_scope() as s:
         d = s.get(Document, doc_id)
         reviewer = s.get(User, d.assigned_to)

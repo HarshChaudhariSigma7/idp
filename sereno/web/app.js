@@ -417,14 +417,16 @@ async function renderReview(id) {
     h("div", { class: "row" }, h("div", { class: "title" }, doc.filename), h("div", { class: "spacer" }), pill(doc.status, doc.status_label)),
     h("div", { class: "muted" }, [doc.doc_type_label, `${doc.page_count} page${doc.page_count === 1 ? "" : "s"}`,
       doc.languages && doc.languages.includes("hindi") ? "English + Hindi" : null, doc.handwriting ? "handwriting" : null].filter(Boolean).join(" · ")),
-    bannerEl, slaEl);
+    bannerEl, slaEl,
+    (doc.checks || []).some(c => c.status === "note") ? h("details", { class: "notes" }, h("summary", {}, "Notes from reading"),
+      h("ul", {}, doc.checks.filter(c => c.status === "note").map(c => h("li", {}, c.message)))) : null);
   const allToggle = h("label", { class: "muted", style: { display: "flex", gap: "6px", alignItems: "center", fontSize: "13px" } },
     h("input", { type: "checkbox", onchange: e => { showAll = e.target.checked; active = 0; renderFields(); } }), "Show all fields (A)");
   if (showAll) allToggle.querySelector("input").checked = true;
   const foot = h("div", { class: "foot" },
     canReview ? h("div", { class: "row" }, allToggle, h("div", { class: "spacer" }), completeBtn) : h("div", { class: "muted" }, doc.reviewed_at ? `Reviewed ${when(doc.reviewed_at)}` : "View only"),
     canReview ? h("div", { class: "keys" }, h("span", {}, h("kbd", {}, "↓"), " ", h("kbd", {}, "↑"), " next / previous"), h("span", {}, h("kbd", {}, "Enter"), " confirm"),
-      h("span", {}, h("kbd", {}, "E"), " or type to correct"), h("span", {}, h("kbd", {}, "Esc"), " cancel"), h("span", {}, h("kbd", {}, "Ctrl"), "+", h("kbd", {}, "Enter"), " finish & next")) : null);
+      h("span", {}, h("kbd", {}, "E"), " or type to correct"), h("span", {}, h("kbd", {}, "S"), " accept suggestion"), h("span", {}, h("kbd", {}, "Esc"), " cancel"), h("span", {}, h("kbd", {}, "Ctrl"), "+", h("kbd", {}, "Enter"), " finish & next")) : null);
   const side = h("div", { class: "side" }, head, fieldsEl, foot);
   shell("review", h("div", { class: "review" }, viewer, side), true);
 
@@ -459,7 +461,10 @@ async function renderReview(id) {
         h("div", { class: "state" }, state),
         editing && i === active ? null : h("div", { class: `val ${shown ? "" : "none"}` }, shown ?? "Not on document"),
         f.needs_review && f.status === "pending" && f.reason ? h("div", { class: "why" }, f.reason) : null,
-        f.alt_value !== null && f.alt_value !== undefined && f.status === "pending" ? h("div", { class: "alt" }, `Other reading: ${fmtVal(f.alt_value, f.type)}`) : null);
+        f.alt_value !== null && f.alt_value !== undefined && f.status === "pending" ? h("div", { class: "alt" }, `Other reading: ${fmtVal(f.alt_value, f.type)}`) : null,
+        f.suggested_value !== null && f.suggested_value !== undefined && f.status === "pending"
+          ? h("div", { class: "sugg" }, h("strong", {}, `Suggested: ${fmtVal(f.suggested_value, f.type)}`), ` · ${f.suggestion_reason || ""} `, h("kbd", {}, "S"), " to accept") : null,
+        (f.evidence || []).length ? h("div", { class: "evid" }, f.evidence.slice(0, 3).map(e => h("span", { class: "ev" }, e))) : null);
       if (editing && i === active) {
         const inp = h("input", { type: "text", value: editVal(f.value, f.type), placeholder: f.type === "date" ? "DD/MM/YYYY" : "" });
         inp.addEventListener("keydown", async e => {
@@ -541,6 +546,8 @@ async function renderReview(id) {
     else if (e.key === "ArrowUp" || e.key === "k") { e.preventDefault(); active = Math.max(0, active - 1); tStart = performance.now(); renderFields(); }
     else if (e.key === "Enter" && f) { e.preventDefault(); act(f, "confirm"); }
     else if ((e.key === "e" || e.key === "E" || e.key === "F2") && f) { e.preventDefault(); editing = true; renderFields(); }
+    else if ((e.key === "s" || e.key === "S") && f && f.suggested_value !== null && f.suggested_value !== undefined && f.status === "pending") {
+      e.preventDefault(); act(f, "correct", editVal(f.suggested_value, f.type)); }
     else if (e.key === "z" || e.key === "Z") { zoomed = !zoomed; focusBox(); }
     else if (e.key === "a" || e.key === "A") { showAll = !showAll; allToggle.querySelector("input").checked = showAll; active = 0; renderFields(); }
     else if (f && e.key.length === 1 && /[0-9A-Za-z₹.,\-\/]/.test(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -645,7 +652,11 @@ async function renderTemplates() {
 
 // ---------------------------------------------------------------- admin
 async function renderAdmin() {
-  const [u, a, sp] = await Promise.all([api("/api/admin/users"), api("/api/admin/audit?limit=100"), api("/api/subprocessors")]);
+  const [u, a, sp, co] = await Promise.all([api("/api/admin/users"), api("/api/admin/audit?limit=100"), api("/api/subprocessors"),
+    api("/api/admin/company")]);
+  const gst = h("textarea", { rows: 3, placeholder: "One GSTIN per line, e.g. 27AAPFU0939F1ZV" });
+  gst.value = (co.own_gstins || []).join("\n");
+  const gerr = h("div", { class: "err" });
   const email = h("input", { type: "email" }), nm = h("input", { type: "text" }), pw = h("input", { type: "password", placeholder: "Min 12 characters" });
   const role = h("select", {}, Object.entries(u.roles).map(([k, v]) => h("option", { value: k, title: v }, k)));
   const err = h("div", { class: "err" });
@@ -664,6 +675,14 @@ async function renderAdmin() {
         try { await api("/api/admin/users", { method: "POST", json: { name: nm.value, email: email.value, role: role.value, password: pw.value } }); toast("User added"); renderAdmin(); }
         catch (e) { err.textContent = e.message; }
       } }, "Add user"), err)),
+    h("div", { class: "card", style: { marginBottom: "16px" } }, h("h2", {}, "Your company's GSTINs"),
+      h("p", { class: "muted" }, "Used to check every invoice is billed to you, and to fix misread buyer GSTINs automatically. " +
+        "GSTINs confirmed on 3+ reviewed invoices are learned on their own" + ((co.learned_gstins || []).length ? `: ${co.learned_gstins.join(", ")}` : ".")),
+      gst, h("div", { class: "row", style: { marginTop: "8px" } }, h("button", { class: "btn primary", onclick: async () => {
+        gerr.textContent = "";
+        try { await api("/api/admin/company", { method: "POST", json: { own_gstins: gst.value.split(/[\s,]+/).filter(Boolean) } }); toast("Saved"); }
+        catch (e) { gerr.textContent = e.message; }
+      } }, "Save GSTINs"), gerr)),
     h("div", { class: "card", style: { marginBottom: "16px" } }, h("h2", {}, "Subprocessors"),
       h("table", { class: "t" }, h("thead", {}, h("tr", {}, ["Name", "Purpose", "Data", "Location"].map(x => h("th", {}, x)))),
         h("tbody", {}, sp.subprocessors.map(s => h("tr", {}, h("td", {}, s.name), h("td", {}, s.purpose), h("td", {}, s.data), h("td", {}, s.location)))))),

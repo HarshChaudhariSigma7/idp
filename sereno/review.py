@@ -118,6 +118,8 @@ def complete_document(s, user, doc: Document, override_failed_checks: bool = Fal
     doc.blob_expires_at = min(doc.blob_expires_at or now, now + timedelta(hours=st.doc_grace_after_done_hours))
     get_store().set_expiry(DOCS, doc.id, doc.blob_expires_at)
     _update_vendor_stats(s, doc)
+    from sereno import masterdata
+    masterdata.learn(s, doc)
     corrected = sum(1 for f in doc.fields if f.status == "corrected")
     audit.record("review.document_completed", session=s, tenant_id=doc.tenant_id, actor_id=user.id, object_type="document",
                  object_id=doc.id, corrected=corrected, overridden=bool(blocking), qa_sample=doc.is_qa_sample,

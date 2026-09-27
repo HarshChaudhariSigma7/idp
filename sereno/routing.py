@@ -32,6 +32,7 @@ STATUS_LABELS = {
     "unreadable": "Couldn't read",
     "failed": "Couldn't process",
     "exported": "Exported",
+    "split": "Split into documents",
 }
 
 

@@ -42,6 +42,14 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "history": 1.0,
     "unparseable": -4.0,
     "missing_required": -6.0,
+    # independent machine evidence (added with QR decoding, crop re-reads, master data)
+    "code_match": 4.0,            # agrees with a machine-readable code (signed e-invoice QR, UPI QR, barcode)
+    "code_filled": 3.0,           # absent/illegible in print, taken from the code
+    "code_mismatch": -4.0,
+    "votes3": 1.5,                # three independent readings (page, page strips, zoomed crop) agree
+    "vote_split": -2.0,
+    "repaired": -3.0,             # value corrected by arithmetic + another reading: always shown to a person
+    "master_match": 1.5,          # matches the company's own records / this vendor's history
 }
 
 
@@ -100,6 +108,13 @@ def features_for(fv: FieldValue, checks_by_key: dict[str, list[CheckResult]], do
     x["history"] = hist
     x["unparseable"] = float(fv.unparseable)
     x["missing_required"] = float(fv.spec.required and fv.value is None and fv.line_index is None)
+    x["code_match"] = float(fv.code_agrees is True and not fv.code_filled)
+    x["code_filled"] = float(fv.code_filled)
+    x["code_mismatch"] = float(fv.code_agrees is False)
+    x["votes3"] = float(fv.votes == "3/3")
+    x["vote_split"] = float(fv.votes in ("2/3", "1/1/1", "illegible on zoom"))
+    x["repaired"] = float(fv.repaired)
+    x["master_match"] = float(fv.master_match is True)
     return x
 
 
@@ -132,14 +147,27 @@ def score_document(doc: ExtractedDoc, checks: list[CheckResult], quality_bucket:
         failed_here = [c for c in checks_by_key.get(fv.key, []) if c.failed]
         for c in failed_here:
             if c.severity == "error":
-                reasons.append((0, f"check:{c.check_id}", c.message))
+                # the most specific explanation first: signed QR, own records, FY swap, duplicate, bank change
+                specific = c.check_id.split(":")[0] in ("qr", "own_gstin", "fy_date", "duplicate", "vendor_bank_changed")
+                reasons.append((-1 if specific else 0, f"check:{c.check_id}", c.message))
             else:
                 reasons.append((3, f"warn:{c.check_id}", c.message))
         if x["missing_required"]:
             reasons.append((1, "missing_required", f"{fv.spec.label} wasn't found on the document"))
-        if x["disagree"]:
+        if fv.repaired:
+            reasons.append((0, "repaired", fv.suggestion_reason or "Corrected automatically; please confirm"))
+        elif x["disagree"]:
             a, b = fv.value, fv.alt_value
-            reasons.append((1, "disagree", f"Two independent readings differ ({_fmt(a)} vs {_fmt(b)})"))
+            why = f"Two independent readings differ ({_fmt(a)} vs {_fmt(b)})"
+            if fv.votes == "2/3":
+                why = f"2 of 3 independent readings say {_fmt(a)} (one said {_fmt(b)})"
+            elif fv.votes == "1/1/1":
+                why = f"Three readings disagree ({_fmt(a)}, {_fmt(b)}, {_fmt(fv.third_value)})"
+            reasons.append((1, "disagree", why))
+        if fv.suggested_value is not None and not fv.repaired:
+            reasons.append((1, "suggestion", f"Suggested {_fmt(fv.suggested_value)}: {fv.suggestion_reason}"))
+        if fv.votes == "illegible on zoom":
+            reasons.append((1, "illegible_zoom", f"{fv.spec.label} could not be read even when zoomed in"))
         if x["unparseable"]:
             reasons.append((1, "unparseable", f"{fv.spec.label} couldn't be read as a {fv.spec.type}"))
         if fv.legibility == "illegible":

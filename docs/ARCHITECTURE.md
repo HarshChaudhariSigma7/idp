@@ -15,6 +15,11 @@
 | Unreadable gate | Decided on original pixels (contrast-normalised sharpness, ink contrast, glyph height, ink ratio), before any model call | Enhancement can make a page look sharper without adding information |
 | Frontend | Vanilla JS modules, no build, no framework, strict CSP | Instant load in a conference room; nothing to break; XSS-safe by construction |
 | Queue | Postgres table with `SKIP LOCKED` | No Redis/Celery to operate during pilots |
+| Machine-readable codes | Decode GST e-invoice QR (NIC-signed JWT), UPI QR and barcodes locally (zxing-cpp, OpenCV fallback, 1-3x scales) before any model call | Exact values at zero model error; a signed QR that disagrees with the print is a misread or an edited page. Codes fill only absent/illegible fields; they never silently overwrite a legible print |
+| Third reading | Blind read of each field's zoomed crop (ink-enhanced, no label, no earlier answer) on hard docs and disagreements; majority vote, verifier only on 1/1/1 ties | A verifier that sees both candidates is anchored; a blind third read is an independent vote |
+| Arithmetic repair | When checks fail, re-read the implicated figures; apply a fix only if it is the unique value that makes every check pass AND another reading saw it; digit-slip-only fixes are suggestions | Correlated misreads (both passes wrong the same way) are caught without the maths "inventing" a value |
+| Company records | Own GSTINs (admin-set or learned from 3 reviewed invoices), vendor profile (name, bank, invoice-number shape), keyed-hash duplicate key, auto-template after 3 reviewed docs | Prior knowledge is the cheapest accuracy; bank-change and duplicate alerts stop payment fraud |
+| Batch files | Triage assigns each page a document index; a multi-document file becomes child documents | Scanners batch 20 invoices into one PDF |
 | No third-party IDP platform | Thin custom pipeline | Full IP ownership, no AGPL exposure for white-label/resale |
 
 ## Data model (Postgres)
@@ -24,16 +29,17 @@ signals + corrections applied) · `extraction_runs` (every model call: model, pr
 latency, encrypted output) · `extracted_fields` (value, raw text, location, score, band, routing
 reason, feature vector, human outcome) · `validation_results` · `corrections` (who, what, when, time
 on field) · `audit_events` (hash chain) · `jobs` · `templates` · `vendor_field_stats` ·
-`match_sets` · `threshold_configs` (versioned, with evidence).
+`match_sets` · `threshold_configs` (versioned, with evidence) · `vendor_profiles` (keyed by pseudonymised
+GSTIN: name, bank account, invoice-number shapes). New nullable columns are added automatically on
+start-up (`db._add_missing_columns`); destructive changes go through migrations.
 
 ## Known limits / next engineering steps
 
-1. Real-document eval not yet run (see EVALUATION.md). Expect the scorer weights to move.
-2. Handwriting-heavy LRs may need a third read on low-agreement fields; decide from eval data.
-3. Line-item alignment between passes is positional/greedy; long invoices (50+ lines) need a
-   stronger alignment (description similarity) if eval shows row-shift errors.
-4. Multi-invoice PDFs (several invoices in one file) are flagged by the model as an anomaly but
-   not yet split automatically.
-5. Duplicate-invoice detection (same vendor + invoice no. + amount) is a cheap, high-value add.
-6. ERP export profiles are configurable per tenant (column names, date format); a native
+1. Real-document eval not yet run with a key (see EVALUATION.md). Expect the scorer weights to move.
+2. E-invoice QR signatures are verified only when NIC public keys are configured
+   (`SERENO_EINVOICE_PUBLIC_KEYS_PEM`); otherwise the QR is trusted as data, not as proof.
+3. Marathi amount-in-words is not parsed (Hindi is). Tamil/Telugu/Gujarati words: not yet.
+4. The blind third read costs one extra call per hard document; measure its catch rate on the
+   eval set and drop it for buckets where it adds nothing.
+5. ERP export profiles are configurable per tenant (column names, date format); a native
    connector only after the first customer confirms their ERP.
