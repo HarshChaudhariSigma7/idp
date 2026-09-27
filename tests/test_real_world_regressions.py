@@ -49,3 +49,14 @@ def test_tax_inclusive_mixed_rate_receipt_is_not_a_false_alarm():
     lines = [{"quantity": 1.0, "rate": r, "line_total": lt} for r, lt in
              [(400.0, 448.0), (100.0, 105.0), (100.0, 103.0), (150.0, 150.0), (50.0, 50.0), (100.0, 112.0)]]
     assert "tax_rate_reconcile" not in failed(run_checks(build(INVOICE, t, lines)))
+
+
+def test_demo_documents_render_readably_without_linux_fonts(monkeypatch):
+    # a Mac has none of the Debian font paths: synthetic demo documents must still be legible
+    from sereno.eval import synth
+    monkeypatch.setattr(synth, "_FONT_CANDIDATES", {"regular": ["/nope.ttf"], "bold": [], "mono": []})
+    monkeypatch.setattr(synth, "_font_cache", {})
+    sd = synth.make_invoice(random.Random(8), "good_scan")
+    q = quality.assess(sd.image)
+    assert q.char_height_px >= 10
+    assert quality.unreadable_reason(q, 1.0, 0.06, 5.0, 0.002) is None

@@ -2,6 +2,7 @@
 
   python scripts/manage.py create-tenant "Sahyadri Auto Components Ltd" admin@sahyadri.in "Priya Kulkarni"
   python scripts/manage.py create-staff reviewer@serenovolante.com "Rahul" sereno_reviewer
+  python scripts/manage.py demo-setup                   # local demo workspace (used by run_local.sh)
   python scripts/manage.py seed-demo <tenant_id>        # synthetic demo docs, offline fake model
   python scripts/manage.py make-synth eval_data/synthetic
   python scripts/manage.py verify-audit
@@ -9,6 +10,7 @@
 """
 from __future__ import annotations
 
+import os
 import random
 import secrets
 import sys
@@ -108,6 +110,49 @@ def seed_demo(tenant_id: str, n: str = "12", review: str = "yes"):
     print(f"seeded {n} synthetic documents (simulated readings{' + simulated reviews' if review == 'yes' else ''})")
 
 
+def demo_setup(n: str = "24"):
+    """Idempotent local demo workspace: one company, four roles that share ONE authenticator entry
+    (so you scan a single QR code), and synthetic sample documents. Local use only."""
+    import pyotp
+    import qrcode
+
+    from sereno.config import get_settings
+    init_db()
+    var = Path(get_settings().data_dir).resolve().parent
+    creds, qr_png = var / "DEMO_LOGIN.txt", var / "demo_mfa_qr.png"
+    with session_scope() as s:
+        demo = [t for t in s.query(Tenant).all() if (t.settings or {}).get("demo")]
+        if demo and creds.exists():
+            print(creds.read_text())
+            return
+        password, secret = secrets.token_urlsafe(12), pyotp.random_base32()
+        t = Tenant(name="Sahyadri Auto Components Ltd (demo)", managed_review=False, settings={"demo": True})
+        s.add(t)
+        s.flush()
+        people = [("cfo@demo.local", "Anita Deshpande", "manager", t.id), ("reviewer@demo.local", "Rohan Patil", "reviewer", t.id),
+                  ("admin@demo.local", "IT Admin", "admin", t.id), ("ops@demo.local", "Sereno Ops", "sereno_ops", None)]
+        for email, name, role, tid in people:
+            if s.query(User).filter(User.email == email).first() is None:
+                s.add(User(tenant_id=tid, email=email, name=name, role=role, password_hash=hash_password(password),
+                           mfa_secret=secret, mfa_enabled=True))
+        tenant_id = t.id
+    seed_demo(tenant_id, n, "yes")
+    uri = pyotp.TOTP(secret).provisioning_uri(name="demo workspace", issuer_name="Sereno Volante (local demo)")
+    qrcode.make(uri).save(qr_png)
+    text = (
+        "SERENO VOLANTE: LOCAL DEMO LOGIN (synthetic data; local use only)\n"
+        f"  Password for every demo user: {password}\n"
+        "  cfo@demo.local       finance head: dashboard, exports, 3-way match\n"
+        "  reviewer@demo.local  review queue (keyboard-driven)\n"
+        "  admin@demo.local     users, audit trail, subprocessors\n"
+        "  ops@demo.local       Sereno internal metrics\n"
+        f"  Two-step code: scan {qr_png} once with Google/Microsoft Authenticator,\n"
+        f"  or add manually with setup key {secret}. The same 6-digit code works for all four users.\n")
+    creds.write_text(text)
+    os.chmod(creds, 0o600)
+    print(text)
+
+
 def make_synth(out: str, n: str = "4"):
     from sereno.eval.synth import write_dataset
     paths = write_dataset(Path(out), int(n))
@@ -128,7 +173,7 @@ def retention_sweep():
     print(f"purged {sweep({})} documents")
 
 
-COMMANDS = {"create-tenant": create_tenant, "create-user": create_user, "create-staff": create_staff,
+COMMANDS = {"demo-setup": demo_setup, "create-tenant": create_tenant, "create-user": create_user, "create-staff": create_staff,
             "seed-demo": seed_demo, "make-synth": make_synth, "verify-audit": verify_audit,
             "retention-sweep": retention_sweep}
 

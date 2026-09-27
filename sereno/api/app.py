@@ -17,6 +17,7 @@ from sereno.config import get_settings
 from sereno.db import init_db
 from sereno.exports.tabular import rows_for, to_csv, to_xlsx
 from sereno.extraction.doc_specs import SPECS
+from sereno.extraction.llm import ai_ready
 from sereno.ingest.loader import UnsupportedDocument
 from sereno.matching.three_way import Tolerances, three_way_match
 from sereno.metrics import dashboard, internal_metrics
@@ -139,6 +140,7 @@ def me(user: User = Depends(current_user), s: Session = Depends(get_db)):
                          "match.run", "template.manage", "user.manage", "audit.view", "metrics.internal") if can(user.role, p)]
     return {"id": user.id, "name": user.name, "email": user.email, "role": user.role,
             "company": tenant.name if tenant else "Sereno Volante", "permissions": perms,
+            "ai_ready": ai_ready(), "demo": bool(tenant and (tenant.settings or {}).get("demo")),
             "sla_minutes": get_settings().review_sla_minutes, "doc_types": {k: v.label for k, v in SPECS.items()}}
 
 
@@ -163,6 +165,10 @@ def _get_doc(s: Session, user: User, doc_id: str) -> Document:
 @app.post("/api/documents")
 async def upload(files: list[UploadFile] = File(...), doc_type: str = Form("auto"),
                  user: User = Depends(require("document.upload")), s: Session = Depends(get_db)):
+    if not ai_ready():
+        msg = ("No Anthropic API key is configured on this server, so new documents can't be read yet. "
+               "Add ANTHROPIC_API_KEY to .env and restart.")
+        return {"results": [{"filename": f.filename, "error": msg} for f in files[:50]]}
     out = []
     for f in files[:50]:
         data = await f.read()

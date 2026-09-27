@@ -20,20 +20,39 @@ from PIL import Image, ImageDraw, ImageFont
 
 from sereno.validation.gst import STATE_CODES, gstin_check_char
 
-FONT_DIR = Path("/usr/share/fonts/truetype")
+# Unicode-capable fonts first (Latin + Devanagari in one face), across Linux, macOS and Windows.
 _FONT_CANDIDATES = {
-    "regular": ["freefont/FreeSans.ttf", "dejavu/DejaVuSans.ttf", "liberation/LiberationSans-Regular.ttf"],
-    "bold": ["freefont/FreeSansBold.ttf", "dejavu/DejaVuSans-Bold.ttf", "liberation/LiberationSans-Bold.ttf"],
-    "mono": ["freefont/FreeMono.ttf", "dejavu/DejaVuSansMono.ttf"],
+    "regular": ["/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+                "/System/Library/Fonts/Supplemental/Arial Unicode.ttf", "/Library/Fonts/Arial Unicode.ttf",
+                "/System/Library/Fonts/Kohinoor.ttc", "C:/Windows/Fonts/Nirmala.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/System/Library/Fonts/Supplemental/Arial.ttf",
+                "/System/Library/Fonts/Helvetica.ttc", "C:/Windows/Fonts/arial.ttf"],
+    "bold": ["/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+             "/System/Library/Fonts/Supplemental/Arial Unicode.ttf", "/Library/Fonts/Arial Unicode.ttf",
+             "/System/Library/Fonts/Kohinoor.ttc", "C:/Windows/Fonts/NirmalaB.ttf",
+             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+             "C:/Windows/Fonts/arialbd.ttf"],
+    "mono": ["/usr/share/fonts/truetype/freefont/FreeMono.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+             "/System/Library/Fonts/Supplemental/Courier New.ttf", "/System/Library/Fonts/Menlo.ttc",
+             "C:/Windows/Fonts/cour.ttf"],
 }
+_font_cache: dict = {}
 
 
 def _font(kind: str, size: int) -> ImageFont.FreeTypeFont:
-    for rel in _FONT_CANDIDATES[kind]:
-        p = FONT_DIR / rel
-        if p.exists():
-            return ImageFont.truetype(str(p), size)
-    return ImageFont.load_default()
+    key = (kind, size)
+    if key not in _font_cache:
+        font = None
+        for path in _FONT_CANDIDATES[kind] + _FONT_CANDIDATES["regular"]:
+            if Path(path).exists():
+                try:
+                    font = ImageFont.truetype(path, size)
+                    break
+                except OSError:
+                    continue
+        # last resort: Pillow's bundled scalable font (Latin only), never the tiny bitmap default
+        _font_cache[key] = font or ImageFont.load_default(size=size)
+    return _font_cache[key]
 
 
 VENDORS = ["Shree Ganesh Engineering Works", "Patel Castings Pvt Ltd", "Kaveri Polymers LLP", "Bharat Fasteners Co.",

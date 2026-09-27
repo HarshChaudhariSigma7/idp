@@ -4,8 +4,10 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Protocol
 
 import anthropic
@@ -63,10 +65,20 @@ def text_block(text: str) -> dict:
 
 
 class AnthropicLLM:
+    _fallback_off = False  # set once if the fallback beta is rejected for this account
+
     def __init__(self):
         s = get_settings()
         self.settings = s
         self.client = anthropic.Anthropic(max_retries=s.llm_max_retries, timeout=s.llm_timeout_s)
+
+    def _send(self, kwargs: dict, use_fallback: bool):
+        if use_fallback:
+            with self.client.beta.messages.stream(**kwargs, betas=["server-side-fallback-2026-07-01"],
+                                                  fallbacks="default") as stream:
+                return stream.get_final_message()
+        with self.client.messages.stream(**kwargs) as stream:
+            return stream.get_final_message()
 
     def structured(self, *, pass_name: str, model: str, system: str, content: list[dict], schema: dict,
                    max_tokens: int = 64000, effort: str | None = None) -> LLMResult:
@@ -80,20 +92,22 @@ class AnthropicLLM:
                            "format": {"type": "json_schema", "schema": schema}},
         )
         t0 = time.monotonic()
+        use_fallback = s.enable_refusal_fallback and model.startswith("claude-opus-5") and not AnthropicLLM._fallback_off
         try:
-            if s.enable_refusal_fallback and model.startswith("claude-opus-5"):
-                with self.client.beta.messages.stream(**kwargs, betas=["server-side-fallback-2026-07-01"],
-                                                      fallbacks="default") as stream:
-                    msg = stream.get_final_message()
-            else:
-                with self.client.messages.stream(**kwargs) as stream:
-                    msg = stream.get_final_message()
-        except anthropic.BadRequestError as e:
-            raise LLMError(f"bad request: {e.message}") from e
-        except anthropic.RateLimitError as e:
-            raise LLMError("rate limited after retries") from e
+            msg = self._send(kwargs, use_fallback)
+        except (anthropic.BadRequestError, anthropic.PermissionDeniedError) as e:
+            if not use_fallback:
+                raise LLMError(f"bad request: {e.message}") from e
+            # The server-side fallback beta may not be enabled for this account/region. Accuracy does
+            # not depend on it (refusals already route to manual entry), so drop it and retry once.
+            log.warning("refusal-fallback beta rejected (%s); continuing without it", e.message)
+            AnthropicLLM._fallback_off = True
+            try:
+                msg = self._send(kwargs, False)
+            except anthropic.APIStatusError as e2:
+                raise LLMError(_explain(e2)) from e2
         except anthropic.APIStatusError as e:
-            raise LLMError(f"API error {e.status_code}") from e
+            raise LLMError(_explain(e)) from e
         except anthropic.APIConnectionError as e:
             raise LLMError("network error reaching the model API") from e
         latency = int((time.monotonic() - t0) * 1000)
@@ -112,6 +126,18 @@ class AnthropicLLM:
                          request_id=getattr(msg, "_request_id", None),
                          input_tokens=msg.usage.input_tokens, output_tokens=msg.usage.output_tokens,
                          latency_ms=latency, stop_reason=msg.stop_reason)
+
+
+def _explain(e: "anthropic.APIStatusError") -> str:
+    if isinstance(e, anthropic.AuthenticationError):
+        return "Anthropic API key was rejected (check ANTHROPIC_API_KEY)"
+    if isinstance(e, anthropic.NotFoundError):
+        return f"model not available to this API key: {e.message}"
+    if isinstance(e, anthropic.RateLimitError):
+        return "rate limited after retries"
+    if isinstance(e, anthropic.BadRequestError):
+        return f"bad request: {e.message}"
+    return f"API error {e.status_code}: {e.message}"
 
 
 class FakeLLM:
@@ -140,6 +166,19 @@ def get_llm() -> LLMClient:
             raise LLMError("fake backend selected but no FakeLLM installed (set_llm)")
         _client = AnthropicLLM()
     return _client
+
+
+def ai_ready() -> bool:
+    """Can documents be read right now? False in a key-less local demo: uploads are refused with a
+    plain message instead of failing later in the background."""
+    if _client is not None:
+        return True
+    if get_settings().llm_backend == "fake":
+        return False
+    if any(os.getenv(k) for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE",
+                                  "ANTHROPIC_FEDERATION_RULE_ID")):
+        return True
+    return (Path.home() / ".config" / "anthropic").exists()  # `ant auth login` profile
 
 
 def set_llm(client: LLMClient | None) -> None:

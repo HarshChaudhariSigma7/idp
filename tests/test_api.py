@@ -152,3 +152,16 @@ def test_internal_metrics_only_for_sereno_ops(client, tenant_and_users):
     assert client.get("/api/documents").json()["documents"] == []  # no document content for ops
     login(client, "admin@sahyadri.test")
     assert client.get("/api/internal/metrics").status_code == 403
+
+
+def test_upload_refused_plainly_without_ai_key(client, tenant_and_users, monkeypatch):
+    for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE", "ANTHROPIC_FEDERATION_RULE_ID"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("HOME", "/nonexistent-home")
+    set_llm(None)
+    login(client, "uploader@sahyadri.test")
+    assert client.get("/api/me").json()["ai_ready"] is False
+    r = client.post("/api/documents", files={"files": ("x.jpg", b"\xff\xd8\xff" + b"0" * 100, "image/jpeg")}, headers=H)
+    assert "No Anthropic API key" in r.json()["results"][0]["error"]
+    with session_scope() as s:
+        assert s.query(Document).count() == 0

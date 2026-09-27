@@ -62,10 +62,11 @@ def _compare(doc_fields, truth: dict):
             yield f.key, f.value_type, values_agree(f.value_type, f.value, expected), f.needs_review
 
 
-def run(dataset: Path, out_dir: Path, fake: bool = False, limit: int | None = None) -> dict:
+def run(dataset: Path, out_dir: Path, fake: bool = False, limit: int | None = None, workers: int = 4,
+        timeout_s: int = 3600) -> dict:
     tmp = Path(tempfile.mkdtemp(prefix="sereno-eval-"))
     os.environ.update({"SERENO_DATABASE_URL": f"sqlite:///{tmp}/eval.db", "SERENO_DATA_DIR": str(tmp / "data"),
-                       "SERENO_QA_SAMPLE_RATE": "0", "SERENO_ENV": "dev"})
+                       "SERENO_QA_SAMPLE_RATE": "0", "SERENO_ENV": "dev", "SERENO_WORKER_THREADS": str(workers)})
     from sereno import config, db
     config.get_settings.cache_clear()
     db.reset_engine()
@@ -74,7 +75,7 @@ def run(dataset: Path, out_dir: Path, fake: bool = False, limit: int | None = No
     from sereno import jobs, pipeline
     from sereno.db import init_db, session_scope
     from sereno.extraction.llm import FakeLLM, set_llm
-    from sereno.models import Document, ExtractedField, Tenant, User
+    from sereno.models import Document, ExtractedField, ExtractionRun, Job, Tenant, User, utcnow
     init_db()
     with session_scope() as s:
         t = Tenant(name="eval", managed_review=False)
@@ -85,30 +86,71 @@ def run(dataset: Path, out_dir: Path, fake: bool = False, limit: int | None = No
         s.flush()
         tid, uid = t.id, u.id
 
-    per_doc = []
-    for n, (src, truth) in enumerate(_items(dataset)):
-        if limit and n >= limit:
-            break
-        if fake:
-            from sereno.eval.fake_model import TruthResponder
-            from sereno.eval.synth import SynthDoc
+    items = [x for i, x in enumerate(_items(dataset)) if not (limit and i >= limit)]
+    terminal = ("ready", "needs_review", "unreadable", "failed", "exported")
+
+    def upload(src: Path, truth: dict) -> str:
+        declared = truth.get("doc_type") if truth.get("doc_type") in ("invoice", "lr", "po", "grn", "contract") else "auto"
+        if truth.get("declare_type") is False:
+            declared = "auto"
+        with session_scope() as s:
+            return pipeline.ingest_upload(s, tid, uid, src.name, src.read_bytes(), declared).document_id
+
+    def pending(ids: list[str]) -> list[str]:
+        with session_scope() as s:
+            return [i for i in ids if s.get(Document, i).status not in terminal]
+
+    def make_retries_runnable() -> None:
+        with session_scope() as s:
+            for j in s.query(Job).filter(Job.status == "queued"):
+                j.run_after = utcnow()
+
+    uploads: list[tuple[Path, dict, str]] = []
+    if fake:  # one fake responder per document -> strictly sequential
+        from sereno.eval.fake_model import TruthResponder
+        from sereno.eval.synth import SynthDoc
+        for src, truth in items:
             sd = SynthDoc(truth["doc_type"], truth.get("fields", {}), truth.get("line_items", []), bucket=truth.get("bucket", ""))
             set_llm(FakeLLM(TruthResponder(sd)))
-        t0 = time.monotonic()
-        with session_scope() as s:
-            declared = truth.get("doc_type") if truth.get("doc_type") in ("invoice", "lr", "po", "grn", "contract") else "auto"
-            if truth.get("declare_type") is False or truth.get("doc_type") == "other":
-                declared = "auto"
-            did = pipeline.ingest_upload(s, tid, uid, src.name, src.read_bytes(), declared).document_id
-        jobs.drain()
+            did = upload(src, truth)
+            for _ in range(jobs.MAX_ATTEMPTS):
+                jobs.drain()
+                if not pending([did]):
+                    break
+                make_retries_runnable()
+            uploads.append((src, truth, did))
+    else:  # real model: parallel workers, like production
+        uploads = [(src, truth, upload(src, truth)) for src, truth in items]
+        ids = [u[2] for u in uploads]
+        print(f"Processing {len(ids)} documents with {workers} parallel workers (real Claude calls)...")
+        jobs.start_workers()
+        t_start, last = time.monotonic(), -1
+        try:
+            while True:
+                left = pending(ids)
+                if len(left) != last:
+                    print(f"  {len(ids) - len(left)}/{len(ids)} done ({int(time.monotonic() - t_start)}s)")
+                    last = len(left)
+                if not left or time.monotonic() - t_start > timeout_s:
+                    break
+                make_retries_runnable()
+                time.sleep(3)
+        finally:
+            jobs.stop_workers()
+
+    per_doc = []
+    for n, (src, truth, did) in enumerate(uploads):
         with session_scope() as s:
             d = s.get(Document, did)
             fields = s.execute(select(ExtractedField).where(ExtractedField.document_id == did)).scalars().all()
             rows = list(_compare(fields, truth)) if d.status not in ("unreadable", "failed") else []
+            err = s.execute(select(ExtractionRun.error).where(ExtractionRun.document_id == did, ExtractionRun.error.is_not(None))
+                            .order_by(ExtractionRun.created_at.desc())).scalars().first()
             per_doc.append({"file": str(src.relative_to(dataset)), "bucket": truth.get("bucket") or src.parent.name,
                             "doc_type": truth.get("doc_type"), "synthetic": bool(truth.get("synthetic")),
-                            "status": d.status, "model": d.model_used, "cost_usd": d.cost_usd or 0.0,
-                            "seconds": round(time.monotonic() - t0, 2), "quality_bucket": d.quality_bucket,
+                            "status": d.status, "status_message": d.status_message, "error_detail": err,
+                            "model": d.model_used, "cost_usd": d.cost_usd or 0.0,
+                            "seconds": round((d.processing_ms or 0) / 1000, 1), "quality_bucket": d.quality_bucket,
                             "fields": len(rows), "correct": sum(r[2] for r in rows),
                             "auto": sum(1 for r in rows if not r[3]),
                             "auto_wrong": sum(1 for r in rows if not r[3] and not r[2]),
@@ -121,8 +163,9 @@ def run(dataset: Path, out_dir: Path, fake: bool = False, limit: int | None = No
                             "type_expected": truth.get("doc_type"), "type_got": d.doc_type if d.doc_type else "other",
                             "errors": [r[0] for r in rows if not r[2]][:20],
                             "escapes": [r[0] for r in rows if not r[2] and not r[3]][:20]})
-        print(f"[{n + 1}] {per_doc[-1]['file']}: {per_doc[-1]['status']} "
-              f"{per_doc[-1]['correct']}/{per_doc[-1]['fields']} correct, escapes={per_doc[-1]['escapes']}")
+        r = per_doc[-1]
+        print(f"[{n + 1}] {r['file']}: {r['status']} {r['correct']}/{r['fields']} correct, escapes={r['escapes']}"
+              + (f" | {r['error_detail'] or r['status_message']}" if r["status"] in ("failed", "unreadable") else ""))
 
     report = summarise(per_doc)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -202,8 +245,9 @@ def main():
     ap.add_argument("--out", type=Path, default=Path("reports"))
     ap.add_argument("--fake", action="store_true", help="plumbing check with the truth-driven fake model (no API calls)")
     ap.add_argument("--limit", type=int)
+    ap.add_argument("--workers", type=int, default=4, help="parallel documents (real model only)")
     a = ap.parse_args()
-    run(a.dataset, a.out, a.fake, a.limit)
+    run(a.dataset, a.out, a.fake, a.limit, a.workers)
 
 
 if __name__ == "__main__":

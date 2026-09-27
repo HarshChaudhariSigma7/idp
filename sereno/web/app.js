@@ -92,6 +92,7 @@ function shell(active, content, full = false) {
       h("div", { class: "logo" }, "Sereno Volante", h("small", {}, ME.company)),
       nav,
       h("div", { class: "me" }, h("span", {}, ME.name), h("button", { onclick: logout }, "Sign out"))),
+    ME.demo ? h("div", { class: "demobar" }, "Demo workspace: synthetic documents with simulated AI readings and reviews. Numbers here are not accuracy data.") : null,
     h("main", { class: full ? "full" : "" }, content));
 }
 async function logout() { await api("/api/auth/logout", { method: "POST" }).catch(() => {}); ME = null; renderLogin(); }
@@ -321,6 +322,8 @@ async function renderDocuments() {
     h("button", { class: "btn", onclick: () => doExport("csv") }, "Export CSV")) : null;
   shell("documents", [
     h("div", { class: "row" }, h("div", {}, h("h1", {}, "Documents"), h("p", { class: "sub" }, "Upload, track and export. Status is updated live.")), h("div", { class: "spacer" }), exportBtns),
+    can("document.upload") && !ME.ai_ready ? h("div", { class: "banner warn", style: { marginBottom: "12px" } },
+      "No Anthropic API key on this server yet: you can explore the sample documents, but new uploads can't be read. Add ANTHROPIC_API_KEY to .env and restart.") : null,
     can("document.upload") ? h("div", { class: "card", style: { marginBottom: "16px" } },
       h("div", { class: "row", style: { marginBottom: "12px" } }, h("label", { class: "f" }, "Document type", typeSel)), drop, fileIn) : null,
     h("div", { class: "card" }, h("div", { class: "row", style: { marginBottom: "8px" } }, h("h2", {}, "All documents"), h("div", { class: "spacer" }), statusSel),

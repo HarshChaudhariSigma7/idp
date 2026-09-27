@@ -110,6 +110,8 @@ table.t tr.click:hover td { background: #f9fafb; }
 
 /* review */
 .review { display: grid; grid-template-columns: minmax(0, 1fr) 460px; height: calc(100vh - 56px); }
+.demobar + main .review { height: calc(100vh - 90px); }
+.demobar { background: #fff4e0; color: #7a4a00; text-align: center; font-weight: 600; font-size: 13px; padding: 8px 16px; border-bottom: 1px solid #f3dcb0; }
 .viewer { position: relative; overflow: hidden; background: #2b2f36; }
 .viewer .stage { position: absolute; inset: 0; overflow: auto; padding: 24px; }
 .viewer .zoomwrap { transform-origin: 0 0; transition: transform .18s ease-out; }
