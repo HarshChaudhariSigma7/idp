@@ -318,17 +318,17 @@ def primary_schema(spec: DocSpec) -> dict:
 
 
 def secondary_schema(spec: DocSpec) -> dict:
-    """Independent re-read of high-stakes fields only, no locations (different task framing)."""
-    header = {f.name: {"$ref": "#/$defs/cell"} for f in spec.high_stakes_fields}
+    """Independent full re-read (different framing, original pixels, no locations). Every field
+    gets a second reading so agreement is evidence for all fields, not only the high-stakes ones."""
+    header = {f.name: {"$ref": "#/$defs/cell"} for f in spec.fields}
     schema: dict = {
         "type": "object", "additionalProperties": False, "$defs": {"cell": _CELL},
         "properties": {"fields": {"type": "object", "additionalProperties": False,
                                   "required": list(header), "properties": header}},
         "required": ["fields"],
     }
-    lhs = spec.high_stakes_line_fields
-    if lhs:
-        cells = {f.name: {"$ref": "#/$defs/cell"} for f in lhs}
+    if spec.line_fields:
+        cells = {f.name: {"$ref": "#/$defs/cell"} for f in spec.line_fields}
         schema["properties"]["line_items"] = {
             "type": "array", "items": {"type": "object", "additionalProperties": False,
                                        "required": list(cells), "properties": cells}}

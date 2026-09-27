@@ -152,6 +152,9 @@ def process_document(document_id: str, llm: LLMClient | None = None) -> None:
             return
         doc.status, doc.status_message = "processing", "Reading document…"
         tenant_id, declared = doc.tenant_id, doc.declared_type
+        # idempotent on retry: derived rows are rebuilt; extraction_runs are kept (they are the log)
+        for model in (Page, ExtractedField, ValidationResult):
+            s.query(model).filter(model.document_id == document_id).delete(synchronize_session=False)
     audit.record("document.processing_started", tenant_id=tenant_id, object_type="document", object_id=document_id)
 
     try:
@@ -341,7 +344,7 @@ def _persist_extraction(document_id: str, doc_x: ExtractedDoc, checks: list[Chec
                 review_reason=sc.reason, reason_codes=sc.reason_codes, features=sc.features,
                 status="pending" if sc.needs_review else "auto", final_value=None))
             if sc.needs_review:
-                flagged_labels.append(fv.spec.label)
+                flagged_labels.append(f"{fv.spec.label} (line {fv.line_index + 1})" if fv.line_index is not None else fv.spec.label)
         if unreadable_pages:
             flagged_labels.append("unreadable page")
         doc.fields_total = len(scores)

@@ -1,0 +1,21 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: sereno
+      POSTGRES_USER: sereno
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes: [pgdata:/var/lib/postgresql/data]
+  app:
+    build: .
+    depends_on: [db]
+    environment:
+      SERENO_DATABASE_URL: postgresql+psycopg2://sereno:${POSTGRES_PASSWORD}@db/sereno
+      SERENO_MASTER_KEY_B64: ${SERENO_MASTER_KEY_B64:?set from KMS/secret manager}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set}
+      SERENO_COOKIE_SECURE: "true"
+    volumes: [blobs:/data]
+    ports: ["8000:8000"]
+volumes:
+  pgdata:
+  blobs:

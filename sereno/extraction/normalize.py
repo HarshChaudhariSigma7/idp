@@ -153,6 +153,10 @@ def values_agree(ftype: str, a, b) -> bool:
         return ca is None and cb is None
     if ftype in ("number", "percent"):
         return abs(float(ca) - float(cb)) < 0.005
+    if ftype == "text" and len(ca) > 25:
+        # long free text (addresses, descriptions, clause summaries): tolerate wording noise
+        from rapidfuzz import fuzz
+        return fuzz.ratio(ca, cb) >= 92
     return ca == cb
 
 

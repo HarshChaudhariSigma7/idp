@@ -130,6 +130,7 @@ def _load_pdf(data: bytes, max_pages: int, render_dpi: int) -> list[LoadedPage]:
             pages.append(LoadedPage(page_no=i + 1, image=img, text=text if native else "",
                                     words=words if native else [], native_text=native,
                                     source_dpi=source_dpi if source_dpi else float(dpi)))
+    pdf.close()
     return pages
 
 

@@ -161,3 +161,33 @@ def test_audit_log_never_contains_pii(tenant_and_users):
 
 def _debug_flags(doc_id):
     return {k: (x.score, x.reason_codes, x.value) for k, x in fields_of(doc_id).items() if x.needs_review}
+
+
+def test_retry_after_transient_api_error_is_idempotent(tenant_and_users):
+    from sereno.extraction.llm import LLMError
+    from sereno.models import Job, Page
+    tid, users = tenant_and_users
+    sd = make_invoice(random.Random(18), "good_scan")
+    good = TruthResponder(sd)
+    state = {"n": 0}
+
+    def flaky(pass_name, schema, content):
+        if pass_name == "primary" and state["n"] == 0:
+            state["n"] += 1
+            raise LLMError("API error 529")
+        return good(pass_name, schema, content)
+    set_llm(FakeLLM(flaky))
+    with session_scope() as s:
+        doc_id = pipeline.ingest_upload(s, tid, users["uploader"], "x.jpg", to_jpeg_bytes(sd.image), "auto").document_id
+    jobs.drain()
+    with session_scope() as s:  # make the scheduled retry runnable now
+        for j in s.query(Job).filter(Job.status == "queued"):
+            j.run_after = j.created_at
+    jobs.drain()
+    d = doc_of(doc_id)
+    assert d.status == "ready", d.status_message
+    with session_scope() as s:
+        assert s.query(Page).filter(Page.document_id == doc_id).count() == 1
+        n_fields = s.query(ExtractedField).filter(ExtractedField.document_id == doc_id).count()
+        assert n_fields == d.fields_total
+        assert s.query(ExtractionRun).filter(ExtractionRun.document_id == doc_id, ExtractionRun.error.is_not(None)).count() == 1

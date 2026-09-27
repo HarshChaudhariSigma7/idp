@@ -2,7 +2,7 @@
 
 Pass A (primary): full schema, enhanced page images (+ native text layer for digital PDFs),
                   with locations for the review screen.
-Pass B (secondary): high-stakes fields only, different framing, ORIGINAL (un-enhanced) pixels as
+Pass B (secondary): every field again, different framing, ORIGINAL (un-enhanced) pixels as
                   zoomed overlapping strips. Independent errors => disagreement is informative.
 Verifier:        runs only on disagreements, sees zoomed crops, picks A / B / neither.
 Disagreement always lowers confidence, even after the verifier picks a side.
@@ -34,6 +34,15 @@ class PreparedPage:
     words: list[Word] = field(default_factory=list)
 
 
+# API limits: at most 100 images and 32 MB per request. Long documents (contracts) get fewer,
+# smaller images; short commercial documents get zoomed strips for the independent re-read.
+MAX_PAGES_WITH_STRIPS = 10
+
+
+def _budget_edge(long_edge: int, n_pages: int) -> int:
+    return long_edge if n_pages <= 6 else (1800 if n_pages <= 15 else 1400)
+
+
 def _img(img: np.ndarray, long_edge: int) -> dict:
     return image_block(encode_jpeg(fit_long_edge(img, long_edge), 90), "image/jpeg")
 
@@ -43,6 +52,7 @@ def _img(img: np.ndarray, long_edge: int) -> dict:
 def run_primary(llm: LLMClient, spec: DocSpec, pages: list[PreparedPage], model: str,
                 long_edge: int, template_hints: str | None = None) -> LLMResult:
     content: list[dict] = []
+    long_edge = _budget_edge(long_edge, len(pages))
     for p in pages:
         content.append(text_block(f"Page {p.page_no} of {len(pages)}:"))
         content.append(_img(p.enhanced, long_edge))
@@ -101,17 +111,19 @@ def parse_primary(spec: DocSpec, data: dict) -> ExtractedDoc:
 
 def run_secondary(llm: LLMClient, spec: DocSpec, pages: list[PreparedPage], model: str, long_edge: int) -> LLMResult:
     content: list[dict] = []
+    long_edge = _budget_edge(long_edge, len(pages))
+    use_strips = len(pages) <= MAX_PAGES_WITH_STRIPS
     for p in pages:
-        strips = tiles(p.original, n=2 if p.original.shape[0] < 2600 else 3)
-        for j, strip in enumerate(strips, 1):
-            content.append(text_block(f"Page {p.page_no}, strip {j} of {len(strips)} (top to bottom):"))
-            content.append(_img(strip, long_edge))
-        content.append(text_block(f"Page {p.page_no}, full page for context:"))
-        content.append(_img(p.original, 1400))
-    hs = [f for f in spec.fields if f.high_stakes]
-    guide = ["Re-key these fields:"] + [f"- {f.name}: {f.label} [{f.type}]" + (f" ({f.hint})" if f.hint else "") for f in hs]
-    if spec.high_stakes_line_fields:
-        guide += ["", "And for every line item row:"] + [f"- {f.name}: {f.label} [{f.type}]" for f in spec.high_stakes_line_fields]
+        if use_strips:
+            strips = tiles(p.original, n=2 if p.original.shape[0] < 2600 else 3)
+            for j, strip in enumerate(strips, 1):
+                content.append(text_block(f"Page {p.page_no}, strip {j} of {len(strips)} (top to bottom):"))
+                content.append(_img(strip, long_edge))
+        content.append(text_block(f"Page {p.page_no}, full page{' for context' if use_strips else ''}:"))
+        content.append(_img(p.original, 1400 if use_strips else long_edge))
+    guide = ["Re-key these fields:"] + [f"- {f.name}: {f.label} [{f.type}]" + (f" ({f.hint})" if f.hint else "") for f in spec.fields]
+    if spec.line_fields:
+        guide += ["", "And for every line item row:"] + [f"- {f.name}: {f.label} [{f.type}]" for f in spec.line_fields]
     content.append(text_block("\n".join(guide)))
     return llm.structured(pass_name="secondary", model=model, system=prompts.SECONDARY_SYSTEM, content=content,
                           schema=secondary_schema(spec))
@@ -145,7 +157,7 @@ def apply_secondary(doc: ExtractedDoc, data: dict) -> list[FieldValue]:
     """Compare pass B with pass A. Returns the fields that disagree."""
     disagreements = []
     bf = data.get("fields", {})
-    for f in doc.spec.high_stakes_fields:
+    for f in doc.spec.fields:
         fa = doc.header[f.name]
         cell = bf.get(f.name) or {}
         bval = None if cell.get("legibility") == "not_present" else normalise(f.type, cell.get("value"))
@@ -154,11 +166,11 @@ def apply_secondary(doc: ExtractedDoc, data: dict) -> list[FieldValue]:
         if not fa.agreement:
             disagreements.append(fa)
     b_lines = data.get("line_items") or []
-    if doc.spec.high_stakes_line_fields:
+    if doc.spec.line_fields:
         mapping = _align_lines(doc.lines, b_lines, doc.spec)
         for i, line in enumerate(doc.lines):
             j = mapping[i]
-            for f in doc.spec.high_stakes_line_fields:
+            for f in doc.spec.line_fields:
                 fa = line[f.name]
                 fa.double_read = True
                 if j is None:

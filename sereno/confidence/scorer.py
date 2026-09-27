@@ -23,7 +23,7 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "absent_optional": 0.5,       # optional field reported as not on the document
     "legibility_partly": -2.0,
     "legibility_illegible": -5.0,
-    "agree": 1.5,
+    "agree": 2.0,
     "disagree": -3.5,
     "verifier_certain": 0.8,
     "raw_inconsistent": -2.5,
@@ -34,7 +34,7 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "format_bad": -4.0,
     "checks_passed": 0.8,
     "checks_failed": -4.0,
-    "doc_check_failed": -1.0,
+    "doc_check_failed": 0.0,      # logged for the backtest; the multiplicative doc penalty already applies
     "quality_digital": 1.0,
     "quality_poor": -1.0,
     "handwriting": -0.7,

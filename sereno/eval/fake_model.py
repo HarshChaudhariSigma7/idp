@@ -83,10 +83,10 @@ class TruthResponder:
                                                         for f in spec.line_fields}})
             return out
         if pass_name == "secondary":
-            out = {"fields": {f.name: self._cell("secondary", f.name, f.type, False) for f in spec.high_stakes_fields}}
-            if spec.high_stakes_line_fields:
+            out = {"fields": {f.name: self._cell("secondary", f.name, f.type, False) for f in spec.fields}}
+            if spec.line_fields:
                 out["line_items"] = [{f.name: self._cell("secondary", f"line_items[{i}].{f.name}", f.type, False)
-                                      for f in spec.high_stakes_line_fields} for i in range(len(self.sd.lines))]
+                                      for f in spec.line_fields} for i in range(len(self.sd.lines))]
             return out
         if pass_name == "verify":
             text = "\n".join(b.get("text", "") for b in content if b.get("type") == "text")

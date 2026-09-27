@@ -26,7 +26,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "httpx>=0.27"]
+dev = ["pytest>=8", "httpx>=0.27", "reportlab>=4"]
 
 [tool.setuptools.packages.find]
 include = ["sereno*"]

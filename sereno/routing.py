@@ -41,9 +41,9 @@ def review_headline(failed_checks: list[CheckResult], flagged_labels: list[str])
             extra = len(flagged_labels) - 1
             return f"Needs your review — {phrase}" + (f" (+{extra} more)" if extra > 0 else "")
     if len(flagged_labels) == 1:
-        return f"Needs your review — please confirm {flagged_labels[0].lower()}"
+        return f"Needs your review — please confirm {flagged_labels[0]}"
     if flagged_labels:
-        return f"Needs your review — {len(flagged_labels)} fields to confirm ({', '.join(flagged_labels[:2]).lower()}…)"
+        return f"Needs your review — {len(flagged_labels)} fields to confirm ({', '.join(flagged_labels[:2])}…)"
     return "Needs your review"
 
 
