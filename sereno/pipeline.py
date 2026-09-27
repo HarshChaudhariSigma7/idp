@@ -191,6 +191,8 @@ def process_document(document_id: str, llm: LLMClient | None = None) -> None:
     spec_base = SPECS[doc_type]
     pages_in = loaded.pages[:spec_base.max_pages]
     rotations = {p.get("page"): p.get("rotation_needed", 0) for p in (triage or {}).get("pages", [])}
+    if triage is None:  # model triage unavailable: fall back to the cheap sideways-page detector
+        rotations = {p.page_no: quality.quarter_turn_hint(p.image) for p in loaded.pages if not p.native_text}
 
     # --- pre-check + auto-correct ---------------------------------------------------------------
     prepared: list[extractor.PreparedPage] = []

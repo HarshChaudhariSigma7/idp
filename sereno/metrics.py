@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import json
 import statistics
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from sereno.config import get_settings
-from sereno.models import Correction, Document, ExtractedField, ExtractionRun, utcnow
+from sereno.models import Correction, Document, ExtractedField, ExtractionRun, Page, Template, ValidationResult, utcnow
 
 SECONDS_PER_FIELD_MANUAL = 8  # conservative manual keying time per field, used for "time saved"
 
@@ -98,6 +98,8 @@ def dashboard(s, tenant_id: str, days: int = 30) -> dict:
             "fields_extracted": fields_total,
         },
         "time_saved_hours": round(auto_fields * SECONDS_PER_FIELD_MANUAL / 3600, 1),
+        "conditions": conditions(s, docs),
+        "technology": technology(s, tenant_id, docs),
         "trend": trend_rows,
         "by_type": dict(by_type),
         "totals": {"documents": len(docs), "completed": len(done)},
@@ -194,3 +196,118 @@ def demo_readiness() -> dict:
                 "cells": []}
     rep = json.loads(p.read_text())
     return {"status": "ok", "run_at": rep.get("run_at"), "cells": rep.get("gate", [])}
+
+
+# --- accuracy by document condition + the technology behind it ----------------------------------
+
+MIN_FIELDS_FOR_CLAIM = 200  # below this a percentage is shown as "building baseline", not a claim
+
+
+def _vernacular(d: Document) -> bool:
+    return bool(d.languages) and any(l not in ("english", "other") for l in d.languages)
+
+
+CONDITIONS = [
+    ("overall", "Overall accuracy", lambda d: True,
+     ["Two independent AI readings of every field", "Every figure re-checked by GST & arithmetic rules",
+      "Confidence from evidence, not model self-report"]),
+    ("printed", "Printed & digital", lambda d: not _vernacular(d) and not d.has_handwriting,
+     ["PDF text-layer cross-check on digital files", "Deskew, upscale and contrast repair on scans",
+      "GSTIN checksum, HSN, e-way and IRN validation"]),
+    ("vernacular", "Vernacular", _vernacular,
+     ["Devanagari & regional script reading, strongest model only", "Indic numerals (०-९) normalised in tested code",
+      "Bilingual label dictionary for LRs, bilty & challans"]),
+    ("handwritten", "Handwritten", lambda d: bool(d.has_handwriting),
+     ["Zoomed re-read on original pixels", "Verifier resolves every disagreement, then a person confirms",
+      "Unreadable pages refused before any guess"]),
+]
+
+EVAL_BUCKETS = {"printed": ("digital", "good_scan", "printed", "poor_scan"), "vernacular": ("bilingual", "vernacular"),
+                "handwritten": ("handwritten",), "overall": None}
+
+
+def _benchmark(cond: str) -> dict | None:
+    p = Path("reports/eval_latest.json")
+    if not p.exists():
+        return None
+    rep = json.loads(p.read_text())
+    docs = [d for d in rep.get("documents", []) if not d.get("synthetic") and
+            (EVAL_BUCKETS[cond] is None or d.get("bucket") in EVAL_BUCKETS[cond])]
+    f = sum(d["fields"] for d in docs)
+    auto = sum(d["auto"] for d in docs)
+    if not f:
+        return None
+    return {"documents": len(docs), "field_accuracy_pct": _pct(sum(d["correct"] for d in docs), f),
+            "escape_rate_pct": _pct(sum(d["auto_wrong"] for d in docs), auto), "run_at": rep.get("run_at")}
+
+
+def conditions(s, docs: list[Document]) -> list[dict]:
+    done = [d for d in docs if d.status in ("ready", "exported") and d.processed_at]
+    ids = [d.id for d in done]
+    fields = s.execute(select(ExtractedField.document_id, ExtractedField.status, ExtractedField.needs_review)
+                       .where(ExtractedField.document_id.in_(ids))).all() if ids else []
+    per_doc = defaultdict(lambda: {"fields": 0, "corrected": 0, "caught": 0})
+    for did, status, flagged in fields:
+        x = per_doc[did]
+        x["fields"] += 1
+        if status == "corrected":
+            x["corrected"] += 1
+            x["caught"] += int(bool(flagged))
+    out = []
+    for key, label, pred, tech in CONDITIONS:
+        sel = [d for d in done if pred(d)]
+        f = sum(per_doc[d.id]["fields"] for d in sel)
+        c = sum(per_doc[d.id]["corrected"] for d in sel)
+        caught = sum(per_doc[d.id]["caught"] for d in sel)
+        daily = defaultdict(lambda: [0, 0])
+        for d in sel:
+            daily[_day(d.processed_at)][0] += per_doc[d.id]["fields"]
+            daily[_day(d.processed_at)][1] += per_doc[d.id]["corrected"]
+        out.append({
+            "key": key, "label": label, "documents": len(sel), "fields": f,
+            "accuracy_pct": _pct(f - c, f), "measured": f >= MIN_FIELDS_FOR_CLAIM,
+            "caught_before_export_pct": _pct(caught, c) if c else None,
+            "no_review_docs_pct": _pct(sum(1 for d in sel if d.fields_flagged == 0), len(sel)),
+            "spot_check": spot_check_accuracy(s, [d for d in sel if d.is_qa_sample and d.reviewed_at]),
+            "trend": [{"day": k, "accuracy": _pct(v[0] - v[1], v[0])} for k, v in sorted(daily.items())],
+            "benchmark": _benchmark(key), "technology": tech,
+        })
+    return out
+
+
+def technology(s, tenant_id: str, docs: list[Document]) -> list[dict]:
+    """Live counters for each stage of the pipeline: what the machinery actually did."""
+    ids = [d.id for d in docs]
+    if not ids:
+        return []
+    pages = s.execute(select(Page.corrections_applied).where(Page.document_id.in_(ids))).scalars().all()
+    corr = Counter(c.split(":")[0] for cs in pages for c in (cs or []) if not c.endswith(":reverted"))
+    feats = s.execute(select(ExtractedField.features, ExtractedField.needs_review, ExtractedField.status)
+                      .where(ExtractedField.document_id.in_(ids))).all()
+    double = sum(1 for f, _, _ in feats if f and (f.get("agree") or f.get("disagree")))
+    disagree = sum(1 for f, _, _ in feats if f and f.get("disagree"))
+    human = sum(1 for _, _, st in feats if st in ("confirmed", "corrected"))
+    checks = s.execute(select(ValidationResult.status).where(ValidationResult.document_id.in_(ids),
+                                                             ValidationResult.stage == "extracted")).scalars().all()
+    verify = s.execute(select(func.count()).select_from(ExtractionRun).where(ExtractionRun.document_id.in_(ids),
+                                                                             ExtractionRun.pass_name == "verify")).scalar() or 0
+    models = Counter((d.model_used or "").replace("claude-", "") for d in docs if d.model_used)
+    ms = sorted(c.time_on_field_ms for c in s.execute(select(Correction).where(Correction.document_id.in_(ids))).scalars()
+                if c.time_on_field_ms)
+    templates = s.execute(select(func.count()).select_from(Template).where(Template.tenant_id == tenant_id,
+                                                                           Template.status == "active")).scalar() or 0
+    return [
+        {"step": "Quality pre-check", "value": len(pages), "unit": "pages checked",
+         "detail": f"{sum(1 for d in docs if d.status == 'unreadable')} refused as unreadable instead of guessed"},
+        {"step": "Auto-correction", "value": sum(corr.values()), "unit": "fixes applied",
+         "detail": ", ".join(f"{v} {k}" for k, v in corr.most_common(4)) or "none needed"},
+        {"step": "Dual independent reading", "value": double, "unit": "fields read twice",
+         "detail": " · ".join(f"{v} {k}" for k, v in models.most_common()) or ""},
+        {"step": "Disagreement verifier", "value": disagree, "unit": "disagreements caught",
+         "detail": f"resolved on zoomed crops in {verify} document(s), then sent to a person"},
+        {"step": "GST & arithmetic checks", "value": len(checks), "unit": "checks run",
+         "detail": f"{sum(1 for c in checks if c == 'fail')} mismatches stopped before export"},
+        {"step": "Human confirmation", "value": human, "unit": "fields confirmed by people",
+         "detail": (f"median {round(ms[len(ms) // 2] / 1000, 1)}s per field" if ms else "") +
+                   (f" · {templates} vendor template(s) active" if templates else "")},
+    ]

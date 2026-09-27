@@ -119,6 +119,11 @@ def test_end_to_end_review_export_and_rbac(client, tenant_and_users):
     login(client, "manager@sahyadri.test")
     dash = client.get("/api/dashboard").json()
     assert dash["turnaround"]["reviewed"] == 1 and dash["accuracy"]["fields_extracted"] > 0
+    conds = {c["key"]: c for c in dash["conditions"]}
+    assert set(conds) == {"overall", "printed", "vernacular", "handwritten"}
+    assert conds["overall"]["fields"] > 0 and not conds["overall"]["measured"]  # < 200 fields: no claim
+    assert conds["overall"]["caught_before_export_pct"] == 100.0  # the one error was flagged, not exported
+    assert [t["step"] for t in dash["technology"]][0] == "Quality pre-check"
     r = client.get("/api/exports", params={"doc_type": "invoice", "fmt": "csv"})
     assert r.status_code == 200
     text = r.content.decode("utf-8-sig")

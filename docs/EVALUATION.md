@@ -17,6 +17,13 @@ the demo and show the confidence routing catching it.
 Get them from pilot prospects under NDA, from Sereno's own purchases, or from transporters directly.
 Redact nothing on the image (it changes difficulty); store under `eval_data/` (git-ignored, encrypted disk).
 
+## 1b. Starter stress set (public web)
+
+`bash datasets/web_v1/fetch.sh` downloads 25 real public documents with labels. Run
+`python -m sereno.eval.offline_checks eval_data/web/labelled` (no key) and
+`python -m sereno.eval.run_eval eval_data/web/labelled --out reports/web_v1` (with key).
+It is a regression set, not a benchmark.
+
 ## 2. Label
 
 For each file `eval_data/real/<bucket>/<name>.pdf|jpg`, create `<name>.truth.json`:

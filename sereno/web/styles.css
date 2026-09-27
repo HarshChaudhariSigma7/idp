@@ -164,3 +164,39 @@ table.t tr.click:hover td { background: #f9fafb; }
 .empty { text-align: center; padding: 48px; color: var(--ink-3); }
 .ok-text { color: var(--ok); font-weight: 600; }
 .bad-text { color: var(--bad); font-weight: 600; }
+
+/* accuracy by condition */
+.sectionhead { display: flex; align-items: baseline; gap: 12px; margin: 24px 0 10px; flex-wrap: wrap; }
+.sectionhead h2 { margin: 0; }
+.conds .cond { display: grid; gap: 8px; align-content: start; }
+.cond .label { font-weight: 700; color: var(--ink-2); font-size: 13px; }
+.cond .hero { font-size: 40px; font-weight: 700; letter-spacing: -.02em; line-height: 1; font-variant-numeric: tabular-nums; }
+.small { font-size: 12.5px; color: var(--ink-2); }
+.muted.small { color: var(--ink-3); }
+.chip { font-size: 11.5px; font-weight: 700; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.chip.ok { background: var(--ok-bg); color: var(--ok); }
+.chip.neutral { background: #f1f3f6; color: var(--ink-3); }
+.spark { width: 100%; height: 44px; display: block; }
+.spark-line { fill: none; stroke: var(--brand-2); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.spark-dot { fill: var(--brand-2); stroke: #fff; stroke-width: 2; }
+.spark-hit { fill: transparent; cursor: default; }
+.spark-empty { stroke: var(--line); stroke-width: 2; stroke-dasharray: 3 4; }
+.sub2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; border-top: 1px solid var(--line); padding-top: 10px; }
+.sub2 .v { font-weight: 700; font-size: 17px; font-variant-numeric: tabular-nums; }
+.sub2 .k { font-size: 12px; color: var(--ink-3); }
+.bench { font-size: 12.5px; font-weight: 600; color: var(--brand); }
+.bench.muted { color: var(--ink-3); font-weight: 500; }
+.tech { background: #f7f9fc; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 2px; }
+.techlabel { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--brand-2); margin-bottom: 4px; }
+.tech ul { margin: 0; padding-left: 16px; display: grid; gap: 3px; font-size: 12.5px; color: var(--ink-2); }
+.techstrip { margin-top: 16px; }
+.techstrip h2 { margin: 0; }
+.steps { list-style: none; margin: 14px 0 0; padding: 0; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 0; }
+.steps li { position: relative; padding: 0 14px; border-left: 1px solid var(--line); display: grid; gap: 2px; align-content: start; }
+.steps li:first-child { border-left: 0; padding-left: 0; }
+.stepno { width: 22px; height: 22px; border-radius: 50%; background: var(--brand); color: #fff; font-size: 12px; font-weight: 700; display: grid; place-items: center; margin-bottom: 6px; }
+.stepname { font-weight: 700; font-size: 13px; }
+.stepval { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 4px; }
+.stepunit { font-size: 12px; color: var(--ink-3); }
+.stepdetail { font-size: 12px; color: var(--ink-2); margin-top: 4px; }
+@media (max-width: 1100px) { .steps { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 16px; } .steps li:nth-child(4) { border-left: 0; padding-left: 0; } }

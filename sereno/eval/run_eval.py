@@ -96,7 +96,10 @@ def run(dataset: Path, out_dir: Path, fake: bool = False, limit: int | None = No
             set_llm(FakeLLM(TruthResponder(sd)))
         t0 = time.monotonic()
         with session_scope() as s:
-            did = pipeline.ingest_upload(s, tid, uid, src.name, src.read_bytes(), truth.get("doc_type", "auto")).document_id
+            declared = truth.get("doc_type") if truth.get("doc_type") in ("invoice", "lr", "po", "grn", "contract") else "auto"
+            if truth.get("declare_type") is False or truth.get("doc_type") == "other":
+                declared = "auto"
+            did = pipeline.ingest_upload(s, tid, uid, src.name, src.read_bytes(), declared).document_id
         jobs.drain()
         with session_scope() as s:
             d = s.get(Document, did)
@@ -111,6 +114,11 @@ def run(dataset: Path, out_dir: Path, fake: bool = False, limit: int | None = No
                             "auto_wrong": sum(1 for r in rows if not r[3] and not r[2]),
                             "wrong": sum(1 for r in rows if not r[2]),
                             "wrong_flagged": sum(1 for r in rows if not r[2] and r[3]),
+                            "must_review": truth.get("must_review", []),
+                            # traps: blank/illegible fields must never be auto-accepted with a value
+                            "must_review_violations": [f.key for f in fields if f.key in truth.get("must_review", [])
+                                                       and f.value is not None and not f.needs_review],
+                            "type_expected": truth.get("doc_type"), "type_got": d.doc_type if d.doc_type else "other",
                             "errors": [r[0] for r in rows if not r[2]][:20],
                             "escapes": [r[0] for r in rows if not r[2] and not r[3]][:20]})
         print(f"[{n + 1}] {per_doc[-1]['file']}: {per_doc[-1]['status']} "
@@ -144,6 +152,8 @@ def _cell(docs: list[dict]) -> dict:
         "mean_seconds": round(statistics.mean(d["seconds"] for d in docs), 1) if docs else None,
         "mean_cost_usd": round(statistics.mean(d["cost_usd"] for d in docs), 4) if docs else None,
         "synthetic_docs": sum(1 for d in docs if d["synthetic"]),
+        "trap_violations": sum(len(d.get("must_review_violations", [])) for d in docs),
+        "doc_type_accuracy_pct": pct(sum(1 for d in docs if d.get("type_expected") == d.get("type_got")), len(docs)),
     }
 
 
@@ -161,6 +171,8 @@ def summarise(per_doc: list[dict]) -> dict:
             reasons.append(f"only {c['documents']} docs (need {GATE['min_docs']})")
         if c["escape_rate_pct"] is None or c["escape_rate_pct"] > GATE["max_escape_rate_pct"]:
             reasons.append(f"escape rate {c['escape_rate_pct']}% > {GATE['max_escape_rate_pct']}%")
+        if c["trap_violations"]:
+            reasons.append(f"{c['trap_violations']} blank/illegible trap field(s) auto-accepted with a value")
         if c["field_accuracy_pct"] is None or c["field_accuracy_pct"] < GATE["min_field_accuracy_pct"]:
             reasons.append(f"field accuracy {c['field_accuracy_pct']}% < {GATE['min_field_accuracy_pct']}%")
         gate.append({"cell": k, "demo_safe": not reasons, "reasons": reasons})
@@ -169,8 +181,9 @@ def summarise(per_doc: list[dict]) -> dict:
 
 
 def to_markdown(r: dict) -> str:
-    cols = ["documents", "field_accuracy_pct", "escape_rate_pct", "error_catch_rate_pct", "auto_accept_pct",
-            "straight_through_docs_pct", "unreadable_or_failed", "mean_seconds", "mean_cost_usd"]
+    cols = ["documents", "field_accuracy_pct", "escape_rate_pct", "error_catch_rate_pct", "trap_violations",
+            "doc_type_accuracy_pct", "auto_accept_pct", "straight_through_docs_pct", "unreadable_or_failed",
+            "mean_seconds", "mean_cost_usd"]
     lines = [f"# Evaluation {r['run_at']}", "", "| cell | " + " | ".join(cols) + " | demo-safe |",
              "|" + "---|" * (len(cols) + 2)]
     gate = {g["cell"]: g for g in r["gate"]}

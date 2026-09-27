@@ -207,6 +207,10 @@ async function renderDashboard() {
       kpi("Average review time", t.average_minutes !== null ? fmtMinutes(t.average_minutes) : "—",
         t.on_time_pct !== null ? `${t.on_time_pct}% within the ${fmtMinutes(t.sla_minutes)} target` : `Target: ${fmtMinutes(t.sla_minutes)}`, tatTone),
       kpi("Data entry saved", d.time_saved_hours ? `${d.time_saved_hours} h` : "—", "Estimated manual keying avoided")),
+    h("div", { class: "sectionhead" }, h("h2", {}, "Accuracy by document condition"),
+      h("span", { class: "muted" }, "Share of fields correct first time, before any human touch. Every uncertain field still goes to a person.")),
+    h("div", { class: "grid g4 conds" }, (d.conditions || []).map(conditionCard)),
+    techStrip(d.technology || []),
     h("div", { class: "grid g2", style: { marginTop: "16px" } },
       h("div", { class: "card chart" },
         h("div", { class: "row" }, h("h2", {}, "Accuracy trend"), h("div", { class: "spacer" }),
@@ -225,6 +229,51 @@ async function renderDashboard() {
         h("tbody", {}, Object.entries(d.by_type).map(([k, v]) => h("tr", {}, h("td", {}, ME.doc_types[k] || k), h("td", { class: "num" }, v.documents),
           h("td", { class: "num" }, v.needed_review), h("td", { class: "num" }, v.documents ? `${Math.round(100 * (v.documents - v.needed_review) / v.documents)}%` : "—")))))),
   ]);
+}
+function sparkline(points) {
+  const pts = points.filter(p => p.accuracy !== null);
+  const W = 240, H = 44, P = 4;
+  const g = svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "spark", role: "img", "aria-label": "Daily accuracy" });
+  if (pts.length < 2) { g.append(svg("line", { x1: P, x2: W - P, y1: H / 2, y2: H / 2, class: "spark-empty" })); return g; }
+  const lo = Math.min(...pts.map(p => p.accuracy)), hi = Math.max(...pts.map(p => p.accuracy));
+  const span = Math.max(hi - lo, 2);
+  const x = i => P + i * (W - 2 * P) / (pts.length - 1), y = v => H - P - (v - (hi - span)) * (H - 2 * P) / span;
+  g.append(svg("path", { d: pts.map((p, i) => `${i ? "L" : "M"}${x(i)},${y(p.accuracy)}`).join(" "), class: "spark-line" }));
+  pts.forEach((p, i) => { const c = svg("circle", { cx: x(i), cy: y(p.accuracy), r: 7, class: "spark-hit" }); c.append(svg("title", {}, `${p.day}: ${p.accuracy}%`)); g.append(c); });
+  const last = pts[pts.length - 1];
+  g.append(svg("circle", { cx: x(pts.length - 1), cy: y(last.accuracy), r: 3, class: "spark-dot" }));
+  return g;
+}
+function conditionCard(c) {
+  const hero = c.accuracy_pct === null ? "—" : `${c.accuracy_pct}%`;
+  const status = !c.fields ? h("span", { class: "chip neutral" }, "No documents yet")
+    : c.measured ? h("span", { class: "chip ok" }, "✓ Measured")
+    : h("span", { class: "chip neutral" }, `Building baseline · ${c.fields} of 200 fields`);
+  const bench = c.benchmark ? h("div", { class: "bench" }, `Benchmark: ${c.benchmark.field_accuracy_pct}% on ${c.benchmark.documents} real labelled documents`)
+    : h("div", { class: "bench muted" }, "Independent benchmark: pending");
+  return h("div", { class: "card cond" },
+    h("div", { class: "row" }, h("div", { class: "label" }, c.label), h("div", { class: "spacer" }), status),
+    h("div", { class: "hero" }, hero),
+    h("div", { class: "muted small" }, (c.key === "vernacular" ? "Hindi & regional scripts · " : "") +
+      (c.fields ? `${qty.format(c.fields)} fields · ${c.documents} documents` : "Appears after the first completed documents")),
+    sparkline(c.trend),
+    h("div", { class: "sub2" },
+      h("div", {}, h("div", { class: "v" }, c.caught_before_export_pct === null ? "—" : `${c.caught_before_export_pct}%`), h("div", { class: "k" }, "errors caught before export")),
+      h("div", {}, h("div", { class: "v" }, c.no_review_docs_pct === null ? "—" : `${c.no_review_docs_pct}%`), h("div", { class: "k" }, "documents with no review"))),
+    c.spot_check && c.spot_check.documents ? h("div", { class: "small" }, `Spot-check: ${c.spot_check.accuracy_pct}% on ${c.spot_check.fields} auto-approved fields`) : null,
+    bench,
+    h("div", { class: "tech" }, h("div", { class: "techlabel" }, "Technology"), h("ul", {}, c.technology.map(t => h("li", {}, t)))));
+}
+function techStrip(steps) {
+  if (!steps.length) return null;
+  return h("div", { class: "card techstrip" },
+    h("div", { class: "row" }, h("h2", {}, "Under the hood"), h("span", { class: "muted" }, "What the system did for your documents in this period")),
+    h("ol", { class: "steps" }, steps.map((st, i) => h("li", {},
+      h("div", { class: "stepno" }, String(i + 1)),
+      h("div", { class: "stepname" }, st.step),
+      h("div", { class: "stepval" }, qty.format(st.value)),
+      h("div", { class: "stepunit" }, st.unit),
+      h("div", { class: "stepdetail" }, st.detail)))));
 }
 function fmtMinutes(m) { return m >= 60 ? `${Math.floor(m / 60)}h ${Math.round(m % 60)}m` : `${Math.round(m)} min`; }
 

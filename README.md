@@ -9,7 +9,8 @@ anything uncertain goes to a human, field by field. We never silently guess.
 
 | Area | State |
 |---|---|
-| Pipeline, validation, review UI, dashboard, exports, 3-way match, templates, security base | Built, 33 automated tests passing |
+| Pipeline, validation, review UI, dashboard, exports, 3-way match, templates, security base | Built, 38 automated tests passing |
+| Real web documents (25: printed, handwritten, Hindi, sideways, blank traps) | All non-model stages tested; 5 real-world bugs found and fixed ([datasets/web_v1](datasets/web_v1/README.md)). Model accuracy on them: needs `ANTHROPIC_API_KEY` |
 | Accuracy on **real** documents | **Not measured yet.** No labelled real set has been run. Synthetic data proves plumbing only |
 | Demo gate | Closed for every document type × quality bucket until `reports/eval_latest.json` says otherwise |
 | ERP connectors | CSV/Excel only, by design. Build Tally/SAP B1/other only after the first customer confirms their ERP |

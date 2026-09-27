@@ -172,6 +172,9 @@ def _invoice(doc: ExtractedDoc, tol: Tol) -> list[CheckResult]:
         if total is not None and taxable is not None:
             tax = _sum(line_tax)
             ok = abs(total - taxable) <= LINE_TOL or (tax > 0 and abs(total - taxable - tax) <= LINE_TOL)
+            if not ok and rate_pct is not None and tax == 0:
+                # e-invoices often print no per-line tax column: total = taxable x (1 + rate)
+                ok = abs(total - taxable * (1 + rate_pct / 100)) <= max(LINE_TOL, total * Decimal("0.0005"))
             out.append(CheckResult(f"line_total:{i}", "pass" if ok else "fail",
                                    f"Line {i + 1}: line total {'is consistent' if ok else 'does not add up'}",
                                    [line_key(i, n) for n in ("taxable_value", "line_total", "cgst_amount", "sgst_amount", "igst_amount")]))
@@ -222,6 +225,10 @@ def _invoice(doc: ExtractedDoc, tol: Tol) -> list[CheckResult]:
         else:
             eff = (tax_total / subtotal * 100).quantize(Decimal("0.01"))
             ok = any(abs(eff - r) <= Decimal("0.05") for r in GST_RATES)
+            totals = [_d(ln["line_total"].value) for ln in lines if "line_total" in ln]
+            if not ok and totals and all(t is not None for t in totals) and gt is not None:
+                # tax-inclusive line totals that add up to the invoice total reconcile mixed rates
+                ok = tol.eq(_sum(totals), gt) and tol.eq(subtotal + tax_total, gt)
             out.append(CheckResult("tax_rate_reconcile", "pass" if ok else "fail",
                                    f"Effective GST rate {eff}% is a standard rate" if ok else
                                    f"Effective GST rate works out to {eff}%, which is not a standard GST rate "

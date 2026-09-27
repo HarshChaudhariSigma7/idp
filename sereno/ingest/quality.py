@@ -69,17 +69,35 @@ def estimate_skew(gray: np.ndarray, max_angle: float = 12.0) -> float:
 
 
 def _char_height(bw: np.ndarray) -> float:
-    n, _, stats, _ = cv2.connectedComponentsWithStats(bw, connectivity=8)
+    """Typical glyph height, counting only components that sit in a text line (have neighbours
+    along a horizontal run) and weighting by ink area. Paper texture, speckle and dashed rules
+    are isolated or thin, so they cannot outvote real characters. Found on a real phone photo,
+    where a plain median reported 4px on readable 12px text and the page was wrongly refused."""
+    bw = cv2.medianBlur(bw, 3)
+    n, labels, stats, cents = cv2.connectedComponentsWithStats(bw, connectivity=8)
     if n <= 1:
         return 0.0
-    hs = stats[1:, cv2.CC_STAT_HEIGHT]
-    ws = stats[1:, cv2.CC_STAT_WIDTH]
-    area = stats[1:, cv2.CC_STAT_AREA]
-    img_h = bw.shape[0]
-    keep = (hs >= 3) & (hs < img_h * 0.08) & (ws < bw.shape[1] * 0.2) & (area >= 6) & (ws / np.maximum(hs, 1) < 4)
+    hs, ws, area = stats[1:, cv2.CC_STAT_HEIGHT], stats[1:, cv2.CC_STAT_WIDTH], stats[1:, cv2.CC_STAT_AREA]
+    img_h, img_w = bw.shape
+    keep = (hs >= 3) & (hs < img_h * 0.08) & (ws < img_w * 0.2) & (area >= 6) & (ws / np.maximum(hs, 1) < 4)
     if keep.sum() < 20:
         return float(np.median(hs)) if len(hs) else 0.0
-    return float(np.median(hs[keep]))
+    rough = float(np.median(hs[keep]))
+    k = max(3, int(round(max(rough, 6) * 0.8)))
+    runs = cv2.dilate(bw, cv2.getStructuringElement(cv2.MORPH_RECT, (k, 1)))
+    rn, rlabels, rstats, _ = cv2.connectedComponentsWithStats(runs, connectivity=8)
+    run_ok = np.zeros(rn, bool)
+    run_ok[1:] = rstats[1:, cv2.CC_STAT_WIDTH] > 2.5 * rstats[1:, cv2.CC_STAT_HEIGHT]
+    cy = np.clip(cents[1:, 1].astype(int), 0, img_h - 1)
+    cx = np.clip(cents[1:, 0].astype(int), 0, img_w - 1)
+    in_line = run_ok[rlabels[cy, cx]]
+    sel = keep & in_line
+    if sel.sum() < 20:
+        sel = keep
+    h, a = hs[sel].astype(float), area[sel].astype(float)
+    order = np.argsort(h)
+    cum = np.cumsum(a[order])
+    return float(h[order][np.searchsorted(cum, cum[-1] / 2)])
 
 
 def assess(img: np.ndarray, source_dpi: float | None = None, native_text: bool = False) -> PageQuality:
@@ -114,7 +132,7 @@ def assess(img: np.ndarray, source_dpi: float | None = None, native_text: bool =
 
 # Bucket thresholds; recalibrate against the labelled eval set (docs/EVALUATION.md).
 GOOD_SHARPNESS_NORM = 100.0
-GOOD_TEXT_CONTRAST = 0.45
+GOOD_TEXT_CONTRAST = 0.35  # grey fonts on clean digital renders sit around 0.40
 GOOD_CHAR_HEIGHT = 12.0
 
 
@@ -145,3 +163,29 @@ def unreadable_reason(q: PageQuality, blur_floor: float, contrast_floor: float,
     if q.sharpness_norm < blur_floor:
         return "The image is too blurry to read reliably. Please rescan or retake the photo in good light."
     return None
+
+
+def quarter_turn_hint(img) -> int:
+    """Cheap sideways-page detector (no model): 90 if text lines run vertically, else 0.
+    Ruling lines are removed first so table grids don't vote. Direction (90 vs 270) and 180° are
+    left to the triage model; this hint only ensures a sideways scan is never read as-is."""
+    gray = _gray(img)
+    scale = 1000 / max(gray.shape)
+    small = cv2.resize(gray, (max(1, int(gray.shape[1] * scale)), max(1, int(gray.shape[0] * scale))),
+                       interpolation=cv2.INTER_AREA)
+    bw = binarize(small)
+    for k in ((40, 1), (1, 40)):  # strip long horizontal / vertical rules
+        lines = cv2.morphologyEx(bw, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, k))
+        bw = cv2.subtract(bw, lines)
+
+    def elongated_mass(kernel) -> float:
+        d = cv2.dilate(bw, cv2.getStructuringElement(cv2.MORPH_RECT, kernel))
+        n, _, st, _ = cv2.connectedComponentsWithStats(d, connectivity=8)
+        if n <= 1:
+            return 0.0
+        w, h, a = st[1:, cv2.CC_STAT_WIDTH], st[1:, cv2.CC_STAT_HEIGHT], st[1:, cv2.CC_STAT_AREA]
+        long_axis, short_axis = (w, h) if kernel[0] > kernel[1] else (h, w)
+        return float(a[(long_axis > 3 * short_axis) & (a > 60)].sum())
+
+    horiz, vert = elongated_mass((9, 1)), elongated_mass((1, 9))
+    return 90 if vert > 1.6 * max(horiz, 1.0) else 0
