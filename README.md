@@ -9,13 +9,40 @@ anything uncertain goes to a human, field by field. We never silently guess.
 
 | Area | State |
 |---|---|
-| Pipeline, validation, review UI, dashboard, exports, 3-way match, templates, security base | Built, 38 automated tests passing |
+| Pipeline, validation, review UI, dashboard, exports, 3-way match, templates, security base | Built, 45 automated tests passing |
 | Real web documents (25: printed, handwritten, Hindi, sideways, blank traps) | All non-model stages tested; 5 real-world bugs found and fixed ([datasets/web_v1](datasets/web_v1/README.md)). Model accuracy on them: needs `ANTHROPIC_API_KEY` |
 | Accuracy on **real** documents | **Not measured yet.** No labelled real set has been run. Synthetic data proves plumbing only |
 | Demo gate | Closed for every document type × quality bucket until `reports/eval_latest.json` says otherwise |
 | ERP connectors | CSV/Excel only, by design. Build Tally/SAP B1/other only after the first customer confirms their ERP |
 
 Before any customer demo: run the 100+ real-document protocol in [docs/EVALUATION.md](docs/EVALUATION.md).
+
+## Run it on your Mac (one command)
+
+```bash
+brew install python@3.12        # once; macOS ships Python 3.9, this needs 3.11+
+git clone https://github.com/HarshChaudhariSigma7/idp.git && cd idp    # private repo: `gh auth login` first
+git checkout claude/sereno-volante-doc-extraction-0ci9j0
+./run_local.sh
+```
+
+First run: installs dependencies (1-3 min), builds a demo company with synthetic documents, prints
+the login, opens the two-step QR code and the app at http://localhost:8000. Later runs start in
+seconds. Everything stays inside the folder (`./var`), bound to localhost only.
+
+| Log in as | You see |
+|---|---|
+| `cfo@demo.local` | dashboard, accuracy by condition, exports, 3-way match |
+| `reviewer@demo.local` | review queue with 4 documents waiting (keyboard: Enter, E, Ctrl+Enter) |
+| `admin@demo.local` | users, tamper-evident audit trail, subprocessors |
+| `ops@demo.local` | internal metrics and the demo gate |
+
+One password and one authenticator entry work for all four (printed in the terminal, saved in
+`var/DEMO_LOGIN.txt`). Demo numbers are simulated and the app says so on every page.
+
+- Read your own documents: put `ANTHROPIC_API_KEY=...` in `.env` (created on first run), restart.
+- Real accuracy on 25 real web documents: `./run_local.sh --eval` (asks first; roughly $10-15 of API usage).
+- Start over: `./run_local.sh --reset`. Other port: `--port 8010`.
 
 ## How a document flows
 
@@ -36,7 +63,7 @@ upload ─► encrypted temp store (TTL) ─► pre-check: DPI, skew, blur, cont
       ─► every model call, score, feature vector and human correction logged (the eval set)
 ```
 
-## Run locally
+## Run manually (developers)
 
 ```bash
 python3.11 -m venv .venv && .venv/bin/pip install -e ".[dev]" reportlab

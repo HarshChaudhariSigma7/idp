@@ -118,6 +118,7 @@ import socket, sys
 start = int(sys.argv[1])
 for port in range(start, start + 20):
     s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # same as uvicorn: a just-stopped server does not block
     try:
         s.bind(("127.0.0.1", port))
         print(port)
