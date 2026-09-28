@@ -134,8 +134,10 @@ for port in range(start, start + 20):
 ' "$PORT")
 URL="http://localhost:$PORT"
 
-if [ "$HAS_KEY" -eq 1 ]; then
-  say "Anthropic key found: documents you upload will be read by Claude."
+if [ -n "${GEMINI_API_KEY:-}" ] || [ -n "${GOOGLE_API_KEY:-}" ]; then
+  say "Gemini key found: documents you upload will be read by Gemini."
+elif [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -d "$HOME/.config/anthropic" ]; then
+  say "Anthropic key found: documents you upload will be read by Claude (SERENO_LLM_BACKEND=anthropic)."
 else
   say "No API key: demo mode (sample documents only). Add GEMINI_API_KEY to .env to read your own."
 fi

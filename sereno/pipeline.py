@@ -189,6 +189,7 @@ def process_document(document_id: str, llm: LLMClient | None = None) -> None:
             triage, cost = tr.data, cost + tr.cost_usd
             runs.append(("triage", tr, st.model_triage, None))
         except LLMError as e:
+            log.warning("triage failed for document %s: %s", document_id, e)
             runs.append(("triage", None, st.model_triage, str(e)))
     groups = _document_groups(triage, len(loaded.pages))
     if len(groups) > 1 and parent_id is None:
