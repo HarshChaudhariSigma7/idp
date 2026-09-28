@@ -8,6 +8,8 @@ shape (the pipeline builds them once via `image_block`/`text_block`); this modul
 """
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import os
 import time
@@ -34,7 +36,6 @@ def _content_to_parts(content: list[dict]) -> list[types.Part]:
             parts.append(types.Part.from_text(text=block["text"]))
         elif block["type"] == "image":
             src = block["source"]
-            import base64
             parts.append(types.Part.from_bytes(data=base64.standard_b64decode(src["data"]),
                                                mime_type=src["media_type"]))
     return parts
@@ -46,6 +47,30 @@ class GeminiLLM:
         self.settings = s
         api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         self.client = genai.Client(api_key=api_key)
+
+    def _send_with_retry(self, model: str, content: list[dict], config: "types.GenerateContentConfig"):
+        # 503 (model overloaded) and 429 (rate limited) are transient and common under real load;
+        # the SDK does not retry them for us, so back off and retry a handful of times before
+        # surfacing an error (the retry count matches the Anthropic client's llm_max_retries).
+        parts = _content_to_parts(content)
+        last: Exception | None = None
+        for attempt in range(self.settings.llm_max_retries + 1):
+            try:
+                return self.client.models.generate_content(
+                    model=model, contents=[types.Content(role="user", parts=parts)], config=config)
+            except genai_errors.ServerError as e:
+                last = e
+                if getattr(e, "code", None) not in (503, 500) or attempt == self.settings.llm_max_retries:
+                    raise LLMError(f"Gemini API server error: {e}") from e
+            except genai_errors.ClientError as e:
+                last = e
+                if getattr(e, "code", None) != 429 or attempt == self.settings.llm_max_retries:
+                    raise LLMError(_explain(e)) from e
+            wait = 2 ** attempt
+            log.warning("Gemini API transient error (attempt %d/%d), retrying in %ds: %s",
+                       attempt + 1, self.settings.llm_max_retries + 1, wait, last)
+            time.sleep(wait)
+        raise LLMError(f"Gemini API error after retries: {last}")  # pragma: no cover - unreachable
 
     def structured(self, *, pass_name: str, model: str, system: str, content: list[dict], schema: dict,
                    max_tokens: int = 64000, effort: str | None = None) -> LLMResult:
@@ -68,14 +93,7 @@ class GeminiLLM:
                 cfg_kwargs["response_schema"] = cfg_kwargs.pop("response_json_schema")
                 config = types.GenerateContentConfig(**cfg_kwargs)
         t0 = time.monotonic()
-        try:
-            resp = self.client.models.generate_content(
-                model=model, contents=[types.Content(role="user", parts=_content_to_parts(content))],
-                config=config)
-        except genai_errors.ClientError as e:
-            raise LLMError(_explain(e)) from e
-        except genai_errors.ServerError as e:
-            raise LLMError(f"Gemini API server error: {e}") from e
+        resp = self._send_with_retry(model, content, config)
         latency = int((time.monotonic() - t0) * 1000)
         cand = resp.candidates[0] if resp.candidates else None
         finish = getattr(cand, "finish_reason", None)
@@ -87,7 +105,6 @@ class GeminiLLM:
         text = getattr(resp, "text", None)
         if not text:
             raise LLMError("model returned no structured output")
-        import json
         try:
             data = json.loads(text)
         except json.JSONDecodeError as e:
