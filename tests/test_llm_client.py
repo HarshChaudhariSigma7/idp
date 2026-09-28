@@ -85,6 +85,9 @@ def test_refusal_and_truncation_are_explicit():
 
 
 def test_ai_ready_false_without_credentials(monkeypatch, tmp_path):
+    from sereno import config
+    monkeypatch.setenv("SERENO_LLM_BACKEND", "anthropic")
+    config.get_settings.cache_clear()
     for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE", "ANTHROPIC_FEDERATION_RULE_ID"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -92,3 +95,18 @@ def test_ai_ready_false_without_credentials(monkeypatch, tmp_path):
     assert not llm.ai_ready()
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
     assert llm.ai_ready()
+    config.get_settings.cache_clear()
+
+
+def test_ai_ready_false_without_gemini_key(monkeypatch, tmp_path):
+    from sereno import config
+    monkeypatch.setenv("SERENO_LLM_BACKEND", "gemini")
+    config.get_settings.cache_clear()
+    for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    llm.set_llm(None)
+    assert not llm.ai_ready()
+    monkeypatch.setenv("GEMINI_API_KEY", "x")
+    assert llm.ai_ready()
+    config.get_settings.cache_clear()

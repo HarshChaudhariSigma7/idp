@@ -4,9 +4,9 @@
 
 | Decision | Choice | Reason |
 |---|---|---|
-| Extraction engine | Claude vision, strict JSON schema (`output_config.format`), per doc type | No free-text parsing; schema violations impossible |
-| Model routing | Sonnet only for clean English digital PDFs; Opus otherwise; auto-escalation to Opus on any disagreement or failed check | Accuracy first; cheap model only where it provably reconciles |
-| Refusal handling | Server-side fallback (`fallbacks: "default"`) on Opus; refusals route the doc to manual entry | A declined request never becomes a silent gap |
+| Extraction engine | Gemini vision, strict JSON schema (`response_json_schema`), per doc type; the `LLMClient` protocol keeps a second provider (Claude) a small adapter away | No free-text parsing; schema violations impossible; not locked to one vendor |
+| Model routing | Gemini Flash only for clean English digital PDFs; Gemini Pro otherwise; auto-escalation to Pro on any disagreement or failed check | Accuracy first; cheap model only where it provably reconciles |
+| Refusal handling | A safety/refusal finish reason routes the doc to manual entry instead of failing silently (Claude backend also gets a server-side fallback beta) | A declined request never becomes a silent gap |
 | Schema shape | Union-free: all values strings, parsed by our own Indian-format normaliser | Compiler limit is 16 union params; also keeps lakh grouping, Devanagari digits, day-first dates in tested code |
 | Self-consistency | Pass B re-reads **every** field with a different prompt on the **original** pixels as zoomed strips; verifier on disagreements | Decorrelates errors (prompt, preprocessing, resolution); agreement becomes evidence for every field so reviewers only see what's uncertain |
 | Arithmetic | Recomputed deterministically, tight tolerance (₹1 + ₹2/crore) | The model never grades its own maths; a 0.1% tolerance was found to hide ₹50 tax misreads |

@@ -1,67 +1,26 @@
-"""Claude API client for structured extraction. Strict JSON-schema output only; never free text."""
+"""Claude API client for structured extraction. Strict JSON-schema output only; never free text.
+Provider-agnostic types (LLMResult, LLMError, the LLMClient protocol, image_block/text_block,
+PRICES) live in llm_types.py and are re-exported here so existing imports keep working; the split
+avoids a circular import with gemini_llm.py, which also needs those types."""
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import os
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Callable
 
 import anthropic
 
 from sereno.config import get_settings
+from sereno.extraction.llm_types import (LLMClient, LLMError, LLMRefusal, LLMResult, LLMTruncated,
+                                         PRICES, image_block, text_block)
+
+__all__ = ["LLMClient", "LLMError", "LLMRefusal", "LLMResult", "LLMTruncated", "PRICES", "image_block",
+          "text_block", "AnthropicLLM", "FakeLLM", "get_llm", "ai_ready", "set_llm"]
 
 log = logging.getLogger("sereno.llm")
-
-# Approximate list prices, USD per million tokens (input, output), for cost metrics only.
-PRICES = {"claude-opus-5": (5.0, 25.0), "claude-sonnet-5": (2.0, 10.0), "claude-opus-4-8": (5.0, 25.0),
-          "claude-opus-5-5": (4.0, 20.0), "claude-haiku-4-5": (1.0, 5.0)}
-
-
-class LLMError(Exception):
-    pass
-
-
-class LLMRefusal(LLMError):
-    pass
-
-
-class LLMTruncated(LLMError):
-    pass
-
-
-@dataclass
-class LLMResult:
-    data: dict
-    model: str
-    served_model: str | None
-    request_id: str | None
-    input_tokens: int
-    output_tokens: int
-    latency_ms: int
-    stop_reason: str | None
-
-    @property
-    def cost_usd(self) -> float:
-        pin, pout = PRICES.get(self.served_model or self.model, PRICES.get(self.model, (5.0, 25.0)))
-        return (self.input_tokens * pin + self.output_tokens * pout) / 1e6
-
-
-class LLMClient(Protocol):
-    def structured(self, *, pass_name: str, model: str, system: str, content: list[dict], schema: dict,
-                   max_tokens: int = 64000, effort: str | None = None) -> LLMResult: ...
-
-
-def image_block(png_or_jpeg: bytes, media_type: str = "image/jpeg") -> dict:
-    return {"type": "image", "source": {"type": "base64", "media_type": media_type,
-                                       "data": base64.standard_b64encode(png_or_jpeg).decode()}}
-
-
-def text_block(text: str) -> dict:
-    return {"type": "text", "text": text}
 
 
 class AnthropicLLM:
@@ -162,9 +121,14 @@ _client: LLMClient | None = None
 def get_llm() -> LLMClient:
     global _client
     if _client is None:
-        if get_settings().llm_backend == "fake":
+        backend = get_settings().llm_backend
+        if backend == "fake":
             raise LLMError("fake backend selected but no FakeLLM installed (set_llm)")
-        _client = AnthropicLLM()
+        if backend == "gemini":
+            from sereno.extraction.gemini_llm import GeminiLLM
+            _client = GeminiLLM()
+        else:
+            _client = AnthropicLLM()
     return _client
 
 
@@ -173,8 +137,12 @@ def ai_ready() -> bool:
     plain message instead of failing later in the background."""
     if _client is not None:
         return True
-    if get_settings().llm_backend == "fake":
+    backend = get_settings().llm_backend
+    if backend == "fake":
         return False
+    if backend == "gemini":
+        from sereno.extraction.gemini_llm import gemini_ready
+        return gemini_ready()
     if any(os.getenv(k) for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE",
                                   "ANTHROPIC_FEDERATION_RULE_ID")):
         return True

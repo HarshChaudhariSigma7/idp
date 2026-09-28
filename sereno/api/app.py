@@ -166,8 +166,10 @@ def _get_doc(s: Session, user: User, doc_id: str) -> Document:
 async def upload(files: list[UploadFile] = File(...), doc_type: str = Form("auto"),
                  user: User = Depends(require("document.upload")), s: Session = Depends(get_db)):
     if not ai_ready():
-        msg = ("No Anthropic API key is configured on this server, so new documents can't be read yet. "
-               "Add ANTHROPIC_API_KEY to .env and restart.")
+        backend = get_settings().llm_backend
+        key_name = "GEMINI_API_KEY" if backend == "gemini" else "ANTHROPIC_API_KEY"
+        msg = (f"No {key_name} is configured on this server, so new documents can't be read yet. "
+               f"Add {key_name} to .env and restart.")
         return {"results": [{"filename": f.filename, "error": msg} for f in files[:50]]}
     out = []
     for f in files[:50]:

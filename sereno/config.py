@@ -22,24 +22,25 @@ class Settings(BaseSettings):
     master_key_id: str = "local-v1"
 
     # --- Models -----------------------------------------------------------------------------
-    # Accuracy first: Opus for anything that is not a trivially clean digital document.
-    model_complex: str = "claude-opus-5"
-    model_clean: str = "claude-sonnet-5"
-    model_triage: str = "claude-sonnet-5"
+    # Accuracy first: the top-tier model for anything that is not a trivially clean digital document.
+    # Provider is set by llm_backend ("gemini" | "anthropic" | "fake"); "fake" is used by tests and
+    # the offline demo seeder, never in prod. model_* fields can be overridden individually too.
+    llm_backend: str = "gemini"
+    model_complex: str = "gemini-3.1-pro"
+    model_clean: str = "gemini-3.8-flash"
+    model_triage: str = "gemini-3.8-flash"
     extraction_effort: str = "high"
     extraction_effort_hard: str = "xhigh"  # handwriting, Indic script, poor scans: think harder
     crop_reads: bool = True                # third blind read on zoomed crops (disputes, hard docs, failed maths)
     arithmetic_repair: bool = True
     # NIC IRP public keys (PEM) to verify e-invoice QR signatures; without them QR data is used unverified
     einvoice_public_keys_pem: list[str] = Field(default_factory=list)
-    # Server-side refusal fallback for Opus-tier requests (Claude API only, beta).
+    # Server-side refusal fallback for Opus-tier requests. Anthropic backend only; ignored on Gemini.
     enable_refusal_fallback: bool = True
     llm_max_retries: int = 3
     llm_timeout_s: float = 300.0
     max_image_long_edge: int = 2400
     max_pages_per_document: int = 12
-    # "fake" is used by tests and the offline demo seeder; never in prod.
-    llm_backend: str = "anthropic"
 
     # --- Quality gates ----------------------------------------------------------------------
     blur_floor: float = 1.0           # contrast-normalised sharpness of the ORIGINAL scan; below => unreadable
