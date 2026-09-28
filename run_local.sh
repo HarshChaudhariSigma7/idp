@@ -104,7 +104,7 @@ if [ "$MODE" = eval ]; then
     echo "No API key found. Add GEMINI_API_KEY (or ANTHROPIC_API_KEY) to .env, or run: export GEMINI_API_KEY=..."
     exit 1
   fi
-  confirm "This sends 25 real documents to the Gemini API (roughly \$3-8 of usage, about 10-20 minutes). Continue?" || exit 1
+  confirm "This sends 25 real documents to the Gemini API (Flash-Lite: free tier; about 10-20 minutes). Continue?" || exit 1
   PYTHON=.venv/bin/python bash datasets/web_v1/fetch.sh
   .venv/bin/python -m sereno.eval.offline_checks eval_data/web/labelled --out reports/web_v1/offline_checks.json > /dev/null
   .venv/bin/python -m sereno.eval.run_eval eval_data/web/labelled --out reports/web_v1

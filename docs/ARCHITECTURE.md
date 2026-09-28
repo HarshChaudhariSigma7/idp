@@ -5,7 +5,7 @@
 | Decision | Choice | Reason |
 |---|---|---|
 | Extraction engine | Gemini vision, strict JSON schema (`response_json_schema`), per doc type; the `LLMClient` protocol keeps a second provider (Claude) a small adapter away | No free-text parsing; schema violations impossible; not locked to one vendor |
-| Model routing | Gemini Flash only for clean English digital PDFs; Gemini Pro otherwise; auto-escalation to Pro on any disagreement or failed check | Accuracy first; cheap model only where it provably reconciles |
+| Model routing | Gemini 3.1 Flash-Lite by default, everywhere (fits a free API key's ~500 req/day quota; Flash and Pro are ~20/day free). `SERENO_MODEL_COMPLEX` overrides the hard-document tier once billing is on (e.g. gemini-3.1-pro); that tier is auto-escalated to on any disagreement or failed check | A demo that works on a free key beats an accurate one that can't run; accuracy tier is a one-env-var upgrade |
 | Refusal handling | A safety/refusal finish reason routes the doc to manual entry instead of failing silently (Claude backend also gets a server-side fallback beta) | A declined request never becomes a silent gap |
 | Schema shape | Union-free: all values strings, parsed by our own Indian-format normaliser | Compiler limit is 16 union params; also keeps lakh grouping, Devanagari digits, day-first dates in tested code |
 | Self-consistency | Pass B re-reads **every** field with a different prompt on the **original** pixels as zoomed strips; verifier on disagreements | Decorrelates errors (prompt, preprocessing, resolution); agreement becomes evidence for every field so reviewers only see what's uncertain |

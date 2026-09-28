@@ -11,7 +11,8 @@ from typing import Protocol
 PRICES = {"claude-opus-5": (5.0, 25.0), "claude-sonnet-5": (2.0, 10.0), "claude-opus-4-8": (5.0, 25.0),
           "claude-opus-5-5": (4.0, 20.0), "claude-haiku-4-5": (1.0, 5.0),
           "gemini-3.1-pro": (2.0, 12.0), "gemini-3-pro": (2.0, 12.0), "gemini-3.8-flash": (0.75, 3.75),
-          "gemini-3.7-flash": (0.75, 3.75), "gemini-2.5-flash": (0.30, 2.50), "gemini-2.5-pro": (1.25, 10.0)}
+          "gemini-3.7-flash": (0.75, 3.75), "gemini-2.5-flash": (0.30, 2.50), "gemini-2.5-pro": (1.25, 10.0),
+          "gemini-3.1-flash-lite": (0.25, 1.50), "gemini-3.5-flash-lite": (0.25, 1.50)}
 
 
 class LLMError(Exception):

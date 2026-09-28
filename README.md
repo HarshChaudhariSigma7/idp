@@ -42,7 +42,7 @@ One password and one authenticator entry work for all four (printed in the termi
 `var/DEMO_LOGIN.txt`). Demo numbers are simulated and the app says so on every page.
 
 - Read your own documents: put `GEMINI_API_KEY=...` in `.env` (created on first run; get one free at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)), restart. `ANTHROPIC_API_KEY` still works if you set `SERENO_LLM_BACKEND=anthropic`.
-- Real accuracy on 25 real web documents: `./run_local.sh --eval` (asks first; roughly $3-8 of Gemini API usage).
+- Real accuracy on 25 real web documents: `./run_local.sh --eval` (asks first; free on Flash-Lite's free tier, roughly $1-3 if you've set a stronger model).
 - Start over: `./run_local.sh --reset`. Other port: `--port 8010`.
 
 ## How a document flows
@@ -55,7 +55,9 @@ upload ─► encrypted temp store (TTL) ─► pre-check: DPI, skew, blur, cont
          document) ─► a batch PDF of several invoices/LRs is split into one document each
       ─► codes: GST e-invoice QR (signed JWT: GSTINs, number, date, total, item count, IRN), UPI QR,
          barcodes, decoded locally at 1-3x. Exact data, no model error
-      ─► model routing: Gemini Flash only for clean English digital PDFs, Gemini Pro (effort xhigh when hard)
+      ─► model routing: Gemini 3.1 Flash-Lite by default (fits the API free tier: ~500 req/day
+         vs ~20 for Flash/Pro); set SERENO_MODEL_COMPLEX=gemini-3.1-pro once billing is on for
+         harder documents (handwriting, poor scans, disagreements)
       ─► pass A: full strict-JSON schema, enhanced images (+ PDF text layer), with field locations
       ─► pass B: independent re-read of every field, different prompt, ORIGINAL pixels as zoomed strips
       ─► pass C (hard docs / disagreements): BLIND read of each field's zoomed crop, ink-enhanced,

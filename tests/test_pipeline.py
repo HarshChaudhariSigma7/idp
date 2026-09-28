@@ -40,7 +40,7 @@ def test_clean_digital_invoice_is_ready_with_cheap_model(tenant_and_users):
     d = doc_of(doc_id)
     assert d.status == "ready", d.status_message
     assert d.quality_bucket == "digital" and d.is_digital
-    assert d.model_used == "gemini-3.8-flash"
+    assert d.model_used == "gemini-3.1-flash-lite"
     assert d.status_message.startswith("Ready to export")
     f = fields_of(doc_id)
     assert f["grand_total"].value == sd.truth["grand_total"]
@@ -57,7 +57,7 @@ def test_scan_uses_strong_model_and_routes_only_the_disputed_field(tenant_and_us
     wrong = sd.lines[1]["quantity"] + 10
     doc_id, llm = run(sd, tenant_and_users, errors={"primary": {"line_items[1].quantity": wrong}})
     d = doc_of(doc_id)
-    assert d.model_used == "gemini-3.1-pro"
+    assert d.model_used == "gemini-3.1-flash-lite"
     # the disagreement is settled by a blind third read of a zoomed crop, not by the verifier
     assert [c["pass"] for c in llm.calls] == ["triage", "primary", "secondary", "crop"]
     f = fields_of(doc_id)
@@ -128,7 +128,7 @@ def test_bilingual_lr_routes_to_opus_and_extracts(tenant_and_users):
     sd = make_lr(random.Random(14), "carbon")
     doc_id, llm = run(sd, tenant_and_users)
     d = doc_of(doc_id)
-    assert d.doc_type == "lr" and d.model_used == "gemini-3.1-pro"
+    assert d.doc_type == "lr" and d.model_used == "gemini-3.1-flash-lite"
     assert "hindi" in (d.languages or [])
     f = fields_of(doc_id)
     assert f["total_freight"].value == sd.truth["total_freight"]

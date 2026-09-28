@@ -26,9 +26,12 @@ class Settings(BaseSettings):
     # Provider is set by llm_backend ("gemini" | "anthropic" | "fake"); "fake" is used by tests and
     # the offline demo seeder, never in prod. model_* fields can be overridden individually too.
     llm_backend: str = "gemini"
-    model_complex: str = "gemini-3.1-pro"
-    model_clean: str = "gemini-3.8-flash"
-    model_triage: str = "gemini-3.8-flash"
+    # gemini-3.1-flash-lite: the free API key tier gives it ~500 requests/day, against ~20/day for
+    # Flash and Pro being effectively unusable free. Swap to gemini-3.1-pro (SERENO_MODEL_COMPLEX)
+    # once billing is on — it reads harder documents (handwriting, poor scans) more accurately.
+    model_complex: str = "gemini-3.1-flash-lite"
+    model_clean: str = "gemini-3.1-flash-lite"
+    model_triage: str = "gemini-3.1-flash-lite"
     extraction_effort: str = "high"
     extraction_effort_hard: str = "xhigh"  # handwriting, Indic script, poor scans: think harder
     crop_reads: bool = True                # third blind read on zoomed crops (disputes, hard docs, failed maths)
