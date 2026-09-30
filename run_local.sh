@@ -2,7 +2,7 @@
 # Run Sereno Volante on your Mac (or Linux) with one command.
 #
 #   ./run_local.sh            demo workspace + app at http://localhost:8000
-#   ./run_local.sh --eval     real accuracy run on 25 real web documents (needs GEMINI_API_KEY)
+#   ./run_local.sh --eval     real accuracy run on 25 real web documents (needs ANTHROPIC_API_KEY)
 #   ./run_local.sh --reset    delete local data (./var) and start fresh
 #
 # Options: --port N   --no-open   --yes (skip confirmations)
@@ -75,11 +75,10 @@ fi
 if [ ! -f .env ]; then
   cat > .env <<'ENV'
 # Local settings for run_local.sh. Never commit this file (it is git-ignored).
-# To read your own documents, remove the # and paste your key (console.anthropic.com or
-# aistudio.google.com/apikey, matching SERENO_LLM_BACKEND below):
-# GEMINI_API_KEY=...
+# To read your own documents, remove the # and paste your key:
 # ANTHROPIC_API_KEY=sk-ant-...
-SERENO_LLM_BACKEND=gemini
+# Gemini is also supported (sereno/extraction/gemini_llm.py): set SERENO_LLM_BACKEND=gemini
+# and GEMINI_API_KEY=... instead.
 SERENO_ENV=dev
 # http://localhost has no TLS; Safari rejects "secure" cookies without it
 SERENO_COOKIE_SECURE=false
@@ -95,16 +94,16 @@ set +a
 mkdir -p var
 
 HAS_KEY=0
-if [ -n "${GEMINI_API_KEY:-}" ] || [ -n "${GOOGLE_API_KEY:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ] \
-   || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -d "$HOME/.config/anthropic" ]; then HAS_KEY=1; fi
+if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -d "$HOME/.config/anthropic" ] \
+   || [ -n "${GEMINI_API_KEY:-}" ] || [ -n "${GOOGLE_API_KEY:-}" ]; then HAS_KEY=1; fi
 
 # --- 4a. Real accuracy run ---------------------------------------------------------------------
 if [ "$MODE" = eval ]; then
   if [ "$HAS_KEY" -eq 0 ]; then
-    echo "No API key found. Add GEMINI_API_KEY (or ANTHROPIC_API_KEY) to .env, or run: export GEMINI_API_KEY=..."
+    echo "No Anthropic API key found. Add it to .env (see the commented line) or run: export ANTHROPIC_API_KEY=sk-ant-..."
     exit 1
   fi
-  confirm "This sends 25 real documents to the Gemini API (Flash-Lite: free tier; about 10-20 minutes). Continue?" || exit 1
+  confirm "This sends 25 real documents to the Claude API (roughly \$10-15 of usage, about 10-20 minutes). Continue?" || exit 1
   PYTHON=.venv/bin/python bash datasets/web_v1/fetch.sh
   .venv/bin/python -m sereno.eval.offline_checks eval_data/web/labelled --out reports/web_v1/offline_checks.json > /dev/null
   .venv/bin/python -m sereno.eval.run_eval eval_data/web/labelled --out reports/web_v1
@@ -134,12 +133,12 @@ for port in range(start, start + 20):
 ' "$PORT")
 URL="http://localhost:$PORT"
 
-if [ -n "${GEMINI_API_KEY:-}" ] || [ -n "${GOOGLE_API_KEY:-}" ]; then
-  say "Gemini key found: documents you upload will be read by Gemini."
-elif [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -d "$HOME/.config/anthropic" ]; then
-  say "Anthropic key found: documents you upload will be read by Claude (SERENO_LLM_BACKEND=anthropic)."
+if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -d "$HOME/.config/anthropic" ]; then
+  say "Anthropic key found: documents you upload will be read by Claude."
+elif [ -n "${GEMINI_API_KEY:-}" ] || [ -n "${GOOGLE_API_KEY:-}" ]; then
+  say "Gemini key found: documents you upload will be read by Gemini (SERENO_LLM_BACKEND=gemini)."
 else
-  say "No API key: demo mode (sample documents only). Add GEMINI_API_KEY to .env to read your own."
+  say "No Anthropic key: demo mode (sample documents only). Add ANTHROPIC_API_KEY to .env to read your own."
 fi
 
 if [ "$OPEN" -eq 1 ]; then

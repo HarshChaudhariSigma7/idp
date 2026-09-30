@@ -164,6 +164,6 @@ def test_upload_refused_plainly_without_ai_key(client, tenant_and_users, monkeyp
     login(client, "uploader@sahyadri.test")
     assert client.get("/api/me").json()["ai_ready"] is False
     r = client.post("/api/documents", files={"files": ("x.jpg", b"\xff\xd8\xff" + b"0" * 100, "image/jpeg")}, headers=H)
-    assert "No GEMINI_API_KEY" in r.json()["results"][0]["error"]
+    assert "No ANTHROPIC_API_KEY" in r.json()["results"][0]["error"]
     with session_scope() as s:
         assert s.query(Document).count() == 0

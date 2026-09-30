@@ -22,16 +22,14 @@ class Settings(BaseSettings):
     master_key_id: str = "local-v1"
 
     # --- Models -----------------------------------------------------------------------------
-    # Accuracy first: the top-tier model for anything that is not a trivially clean digital document.
-    # Provider is set by llm_backend ("gemini" | "anthropic" | "fake"); "fake" is used by tests and
-    # the offline demo seeder, never in prod. model_* fields can be overridden individually too.
-    llm_backend: str = "gemini"
-    # gemini-3.1-flash-lite: the free API key tier gives it ~500 requests/day, against ~20/day for
-    # Flash and Pro being effectively unusable free. Swap to gemini-3.1-pro (SERENO_MODEL_COMPLEX)
-    # once billing is on — it reads harder documents (handwriting, poor scans) more accurately.
-    model_complex: str = "gemini-3.1-flash-lite"
-    model_clean: str = "gemini-3.1-flash-lite"
-    model_triage: str = "gemini-3.1-flash-lite"
+    # Accuracy first: Opus for anything that is not a trivially clean digital document.
+    # Provider is set by llm_backend ("anthropic" | "gemini" | "fake"); "fake" is used by tests and
+    # the offline demo seeder, never in prod. Gemini support (sereno/extraction/gemini_llm.py)
+    # stays in the codebase behind SERENO_LLM_BACKEND=gemini, but Claude is the default.
+    llm_backend: str = "anthropic"
+    model_complex: str = "claude-opus-5"
+    model_clean: str = "claude-sonnet-5"
+    model_triage: str = "claude-sonnet-5"
     extraction_effort: str = "high"
     extraction_effort_hard: str = "xhigh"  # handwriting, Indic script, poor scans: think harder
     crop_reads: bool = True                # third blind read on zoomed crops (disputes, hard docs, failed maths)

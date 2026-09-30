@@ -46,7 +46,7 @@ Labelling cost: ~6–10 min per document → ~2 person-days for 150 documents.
 ## 3. Run
 
 ```bash
-export GEMINI_API_KEY=...               # real model calls
+export ANTHROPIC_API_KEY=...            # real model calls
 python -m sereno.eval.run_eval eval_data/real --out reports
 ```
 

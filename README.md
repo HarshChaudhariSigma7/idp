@@ -11,7 +11,7 @@ anything uncertain goes to a human, field by field. We never silently guess.
 |---|---|
 | Pipeline, validation, review UI, dashboard, exports, 3-way match, templates, security base | Built, 63 automated tests passing |
 | Accuracy engine: signed e-invoice QR, 3 blind readings + vote, evidence-backed repair, company records, batch split | Built; 17 scenario tests ([tests/test_accuracy_scenarios.py](tests/test_accuracy_scenarios.py)); QR decoding verified on real samples |
-| Real web documents (25: printed, handwritten, Hindi, sideways, blank traps) | All non-model stages tested; 5 real-world bugs found and fixed ([datasets/web_v1](datasets/web_v1/README.md)). Model accuracy on them: needs `GEMINI_API_KEY` |
+| Real web documents (25: printed, handwritten, Hindi, sideways, blank traps) | All non-model stages tested; 5 real-world bugs found and fixed ([datasets/web_v1](datasets/web_v1/README.md)). Model accuracy on them: needs `ANTHROPIC_API_KEY` |
 | Accuracy on **real** documents | **Not measured yet.** No labelled real set has been run. Synthetic data proves plumbing only |
 | Demo gate | Closed for every document type × quality bucket until `reports/eval_latest.json` says otherwise |
 | ERP connectors | CSV/Excel only, by design. Build Tally/SAP B1/other only after the first customer confirms their ERP |
@@ -41,8 +41,8 @@ seconds. Everything stays inside the folder (`./var`), bound to localhost only.
 One password and one authenticator entry work for all four (printed in the terminal, saved in
 `var/DEMO_LOGIN.txt`). Demo numbers are simulated and the app says so on every page.
 
-- Read your own documents: put `GEMINI_API_KEY=...` in `.env` (created on first run; get one free at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)), restart. `ANTHROPIC_API_KEY` still works if you set `SERENO_LLM_BACKEND=anthropic`.
-- Real accuracy on 25 real web documents: `./run_local.sh --eval` (asks first; free on Flash-Lite's free tier, roughly $1-3 if you've set a stronger model).
+- Read your own documents: put `ANTHROPIC_API_KEY=...` in `.env` (created on first run), restart. Gemini also works: set `SERENO_LLM_BACKEND=gemini` and `GEMINI_API_KEY=...` instead.
+- Real accuracy on 25 real web documents: `./run_local.sh --eval` (asks first; roughly $10-15 of API usage).
 - Start over: `./run_local.sh --reset`. Other port: `--port 8010`.
 
 ## How a document flows
@@ -55,9 +55,7 @@ upload ─► encrypted temp store (TTL) ─► pre-check: DPI, skew, blur, cont
          document) ─► a batch PDF of several invoices/LRs is split into one document each
       ─► codes: GST e-invoice QR (signed JWT: GSTINs, number, date, total, item count, IRN), UPI QR,
          barcodes, decoded locally at 1-3x. Exact data, no model error
-      ─► model routing: Gemini 3.1 Flash-Lite by default (fits the API free tier: ~500 req/day
-         vs ~20 for Flash/Pro); set SERENO_MODEL_COMPLEX=gemini-3.1-pro once billing is on for
-         harder documents (handwriting, poor scans, disagreements)
+      ─► model routing: Sonnet only for clean English digital PDFs, Opus (effort xhigh when hard)
       ─► pass A: full strict-JSON schema, enhanced images (+ PDF text layer), with field locations
       ─► pass B: independent re-read of every field, different prompt, ORIGINAL pixels as zoomed strips
       ─► pass C (hard docs / disagreements): BLIND read of each field's zoomed crop, ink-enhanced,
@@ -79,7 +77,7 @@ upload ─► encrypted temp store (TTL) ─► pre-check: DPI, skew, blur, cont
 ```bash
 python3.11 -m venv .venv && .venv/bin/pip install -e ".[dev]" reportlab
 .venv/bin/pytest -q                                   # 63 tests, no API key needed
-cp .env.example .env                                  # set GEMINI_API_KEY + SERENO_MASTER_KEY_B64
+cp .env.example .env                                  # set ANTHROPIC_API_KEY + SERENO_MASTER_KEY_B64
 .venv/bin/python scripts/manage.py create-tenant "Acme Castings Ltd" admin@acme.in "Priya K" no
 .venv/bin/uvicorn sereno.api.app:app --port 8000      # http://localhost:8000
 ```
