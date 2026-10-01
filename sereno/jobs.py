@@ -67,7 +67,11 @@ def run_one(worker_id: str = "inline") -> bool:
     except PermanentJobError as e:
         status, err, retry = "failed", str(e), False
     except Exception as e:  # noqa: BLE001
-        log.error("job %s failed: %s", job.id, traceback.format_exc())
+        # One line on the terminal by default (the library traceback underneath a network error
+        # is rarely what a local run needs to see); the full trace is still one `--log-level
+        # debug` away for real debugging.
+        log.error("job %s (%s) failed: %s: %s", job.id, job.kind, type(e).__name__, e)
+        log.debug("full traceback for job %s:\n%s", job.id, traceback.format_exc())
         retry = job.attempts < MAX_ATTEMPTS
         status, err = ("queued" if retry else "failed"), f"{type(e).__name__}: {e}"[:2000]
     with session_scope() as s:
@@ -105,8 +109,9 @@ def _loop(worker_id: str, periodic: bool):
                 for kind in ("retention_sweep",):
                     if kind in HANDLERS:
                         HANDLERS[kind]({})
-        except Exception:  # noqa: BLE001
-            log.error("worker loop error: %s", traceback.format_exc())
+        except Exception as e:  # noqa: BLE001
+            log.error("worker loop error: %s: %s", type(e).__name__, e)
+            log.debug("full traceback:\n%s", traceback.format_exc())
             did = False
         if not did:
             _stop.wait(st.worker_poll_s)

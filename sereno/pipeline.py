@@ -56,12 +56,18 @@ def ingest_upload(s, tenant_id: str, user_id: str, filename: str, data: bytes, d
     if len(data) > 40 * 1024 * 1024:
         raise loader.UnsupportedDocument("File is larger than 40 MB. Please split it or scan at 300 DPI.")
     sha = hashlib.sha256(data).hexdigest()
-    existing = s.execute(select(Document).where(Document.tenant_id == tenant_id, Document.content_sha256 == sha,
-                                                Document.blob_purged_at.is_(None))).scalars().first()
-    if existing:
+    # Identical bytes seen before (same file re-uploaded, e.g. after a failed first attempt, or
+    # testing with the same sample) are informational, never blocking: the file is always
+    # ingested and processed as its own new document. `duplicate=True` just tells the UI this
+    # exact file was seen before, so it can show a note -- the same policy as every other
+    # duplicate-shaped signal in the product (GSTIN+invoice-number matches at review time): flag
+    # for a person, never silently refuse or silently reuse the old result.
+    seen_before = bool(s.execute(select(func.count()).select_from(Document).where(
+        Document.tenant_id == tenant_id, Document.content_sha256 == sha,
+        Document.blob_purged_at.is_(None))).scalar())
+    if seen_before:
         audit.record("document.upload_duplicate", session=s, tenant_id=tenant_id, actor_id=user_id,
-                     object_type="document", object_id=existing.id)
-        return UploadOutcome(existing.id, True)
+                     object_type="document", object_id=None, content_sha256=sha[:12])
     if declared_type not in SPECS and declared_type != "auto":
         declared_type = "auto"
     doc = Document(tenant_id=tenant_id, uploaded_by=user_id, filename=filename[:255], content_sha256=sha, mime_type=mime,
@@ -73,7 +79,7 @@ def ingest_upload(s, tenant_id: str, user_id: str, filename: str, data: bytes, d
     jobs.enqueue(s, "process_document", {"document_id": doc.id})
     audit.record("document.uploaded", session=s, tenant_id=tenant_id, actor_id=user_id, object_type="document",
                  object_id=doc.id, bytes=len(data), mime=mime.replace("/", "_"), declared_type=declared_type)
-    return UploadOutcome(doc.id, False)
+    return UploadOutcome(doc.id, seen_before)
 
 
 # --- processing ----------------------------------------------------------------------------------

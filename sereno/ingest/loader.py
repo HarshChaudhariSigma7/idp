@@ -2,10 +2,15 @@
 from __future__ import annotations
 
 import io
+import logging
 from dataclasses import dataclass, field
 
 import numpy as np
 from PIL import Image, ImageOps
+
+# pdfminer (via pdfplumber) warns on every page with an incomplete font descriptor -- harmless
+# and common in real-world PDFs; the warning itself carries no information we act on.
+logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
 A4_LONG_IN = 11.69
 
