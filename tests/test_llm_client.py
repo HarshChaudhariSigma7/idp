@@ -110,3 +110,50 @@ def test_ai_ready_false_without_gemini_key(monkeypatch, tmp_path):
     monkeypatch.setenv("GEMINI_API_KEY", "x")
     assert llm.ai_ready()
     config.get_settings.cache_clear()
+
+
+def _conn_error(cause: Exception | None = None):
+    req = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    e = anthropic.APIConnectionError(message="Connection error.", request=req)
+    e.__cause__ = cause
+    return e
+
+
+def test_connection_error_retries_then_falls_back_to_non_streaming(monkeypatch):
+    # every streamed attempt fails; the client keeps retrying rather than giving up immediately,
+    # and the final attempt uses .create() (no streaming) instead of raising
+    monkeypatch.setattr(llm.time, "sleep", lambda *_: None)
+    calls = []
+
+    def always_fails_stream(**kw):
+        calls.append("stream")
+        raise _conn_error(TimeoutError("timed out"))
+
+    def succeeds_create(**kw):
+        calls.append("create")
+        return _msg({"ok": 1})
+    c = SimpleNamespace(messages=SimpleNamespace(stream=always_fails_stream, create=succeeds_create))
+    o = _llm(c)
+    o.settings = llm.get_settings().model_copy(update={"llm_max_retries": 1})
+    r = o.structured(pass_name="primary", model="claude-sonnet-5", system="s", content=[], schema={})
+    assert r.data == {"ok": 1} and calls == ["stream", "create"]
+
+
+def test_tls_record_corruption_switches_client_and_retries_immediately(monkeypatch):
+    llm.AnthropicLLM._tls_workaround = False
+    attempts = []
+
+    def plain_stream(**kw):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise _conn_error(Exception("[SSL: SSLV3_ALERT_BAD_RECORD_MAC] ssl/tls alert bad record mac"))
+        return _Stream(_msg({"ok": 1}))
+    c = SimpleNamespace(messages=SimpleNamespace(stream=plain_stream, create=lambda **kw: _msg({"ok": 1})))
+    monkeypatch.setattr(llm.anthropic, "Anthropic", lambda **kw: c)  # the rebuilt client after the switch
+    try:
+        r = _llm(c).structured(pass_name="primary", model="claude-sonnet-5", system="s", content=[], schema={})
+        assert r.data == {"ok": 1}
+        assert llm.AnthropicLLM._tls_workaround is True
+        assert len(attempts) == 2  # failed once, switched, succeeded on the very next try (no backoff wait)
+    finally:
+        llm.AnthropicLLM._tls_workaround = False

@@ -23,13 +23,33 @@ __all__ = ["LLMClient", "LLMError", "LLMRefusal", "LLMResult", "LLMTruncated", "
 log = logging.getLogger("sereno.llm")
 
 
+def _http_client():
+    """A custom transport that works around a real failure seen on some Python/OpenSSL builds
+    (e.g. uv's standalone macOS interpreters): large requests corrupt in transit with
+    SSLV3_ALERT_BAD_RECORD_MAC, while small requests (plain curl/httpx GETs) succeed -- on more
+    than one network, ruling out the network itself. TLS 1.3's session tickets and record layer
+    are the part of the stack that differs for larger transfers; forcing TLS 1.2 and a fresh
+    connection per request (no keep-alive reuse, where a stale session ticket could be replayed)
+    avoids the code path that corrupts. No meaningful security cost: TLS 1.2 is still fully
+    supported and secure for this traffic."""
+    import httpx2
+    import ssl as ssl_mod
+    ctx = ssl_mod.create_default_context()
+    ctx.maximum_version = ssl_mod.TLSVersion.TLSv1_2
+    return httpx2.Client(verify=ctx, limits=httpx2.Limits(max_keepalive_connections=0))
+
+
 class AnthropicLLM:
     _fallback_off = False  # set once if the fallback beta is rejected for this account
+    _tls_workaround = False  # set once a BAD_RECORD_MAC-shaped failure is seen; sticky per process
 
     def __init__(self):
         s = get_settings()
         self.settings = s
-        self.client = anthropic.Anthropic(max_retries=s.llm_max_retries, timeout=s.llm_timeout_s)
+        kwargs = dict(max_retries=s.llm_max_retries, timeout=s.llm_timeout_s)
+        if AnthropicLLM._tls_workaround or os.getenv("SERENO_FORCE_TLS12"):
+            kwargs["http_client"] = _http_client()
+        self.client = anthropic.Anthropic(**kwargs)
 
     def _send(self, kwargs: dict, use_fallback: bool, no_stream: bool = False):
         # no_stream=True: some networks (antivirus/firewall doing TLS inspection, certain ISPs)
@@ -59,6 +79,13 @@ class AnthropicLLM:
                 last = e
                 log.warning("Claude API connection error (attempt %d/%d, %s): %s", attempt + 1,
                            self.settings.llm_max_retries + 1, "non-streaming" if no_stream else "streaming", e)
+                if "BAD_RECORD_MAC" in str(e.__cause__ or e) and not AnthropicLLM._tls_workaround:
+                    log.warning("TLS record corruption detected; switching to a TLS 1.2, no-keep-alive "
+                               "client and retrying immediately")
+                    AnthropicLLM._tls_workaround = True
+                    self.client = anthropic.Anthropic(max_retries=self.settings.llm_max_retries,
+                                                      timeout=self.settings.llm_timeout_s, http_client=_http_client())
+                    continue  # retry now, without burning the attempt on backoff
                 if no_stream:
                     raise
                 time.sleep(2 ** attempt)
