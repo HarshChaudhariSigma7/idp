@@ -31,13 +31,38 @@ class AnthropicLLM:
         self.settings = s
         self.client = anthropic.Anthropic(max_retries=s.llm_max_retries, timeout=s.llm_timeout_s)
 
-    def _send(self, kwargs: dict, use_fallback: bool):
+    def _send(self, kwargs: dict, use_fallback: bool, no_stream: bool = False):
+        # no_stream=True: some networks (antivirus/firewall doing TLS inspection, certain ISPs)
+        # corrupt or drop long-lived streamed connections while a quick non-streamed request goes
+        # through fine (verified: plain GETs succeeded while .stream() failed with a connection
+        # error). A non-streaming call waits for the whole response at once instead of reading it
+        # incrementally, which sidesteps that failure mode.
         if use_fallback:
+            if no_stream:
+                return self.client.beta.messages.create(**kwargs, betas=["server-side-fallback-2026-07-01"],
+                                                        fallbacks="default")
             with self.client.beta.messages.stream(**kwargs, betas=["server-side-fallback-2026-07-01"],
                                                   fallbacks="default") as stream:
                 return stream.get_final_message()
+        if no_stream:
+            return self.client.messages.create(**kwargs)
         with self.client.messages.stream(**kwargs) as stream:
             return stream.get_final_message()
+
+    def _send_with_retry(self, kwargs: dict, use_fallback: bool):
+        last: Exception | None = None
+        for attempt in range(self.settings.llm_max_retries + 1):
+            no_stream = attempt == self.settings.llm_max_retries  # last attempt: avoid streaming entirely
+            try:
+                return self._send(kwargs, use_fallback, no_stream=no_stream)
+            except anthropic.APIConnectionError as e:
+                last = e
+                log.warning("Claude API connection error (attempt %d/%d, %s): %s", attempt + 1,
+                           self.settings.llm_max_retries + 1, "non-streaming" if no_stream else "streaming", e)
+                if no_stream:
+                    raise
+                time.sleep(2 ** attempt)
+        raise last  # pragma: no cover - unreachable
 
     def structured(self, *, pass_name: str, model: str, system: str, content: list[dict], schema: dict,
                    max_tokens: int = 64000, effort: str | None = None) -> LLMResult:
@@ -53,7 +78,7 @@ class AnthropicLLM:
         t0 = time.monotonic()
         use_fallback = s.enable_refusal_fallback and model.startswith("claude-opus-5") and not AnthropicLLM._fallback_off
         try:
-            msg = self._send(kwargs, use_fallback)
+            msg = self._send_with_retry(kwargs, use_fallback)
         except (anthropic.BadRequestError, anthropic.PermissionDeniedError) as e:
             if not use_fallback:
                 raise LLMError(f"bad request: {e.message}") from e
@@ -62,13 +87,15 @@ class AnthropicLLM:
             log.warning("refusal-fallback beta rejected (%s); continuing without it", e.message)
             AnthropicLLM._fallback_off = True
             try:
-                msg = self._send(kwargs, False)
+                msg = self._send_with_retry(kwargs, False)
             except anthropic.APIStatusError as e2:
                 raise LLMError(_explain(e2)) from e2
         except anthropic.APIStatusError as e:
             raise LLMError(_explain(e)) from e
         except anthropic.APIConnectionError as e:
-            raise LLMError("network error reaching the model API") from e
+            # Surface the real cause (DNS, TLS, timeout...) instead of a generic message, so a
+            # network problem is diagnosable from the server log instead of looking like a bug.
+            raise LLMError(f"network error reaching the model API: {e.__cause__ or e}") from e
         latency = int((time.monotonic() - t0) * 1000)
         if msg.stop_reason == "refusal":
             raise LLMRefusal("model declined to process this document")
