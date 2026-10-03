@@ -27,21 +27,24 @@ def _value_str(ftype: str, v) -> str:
 
 
 class TruthResponder:
-    """errors: {"primary": {"grand_total": 99999.0, "line_items[0].quantity": 11.0}, "secondary": {...}}
-    verifier_truthful: verifier returns the ground truth for disputed keys."""
+    """errors: {"primary": {"grand_total": 99999.0, "line_items[0].quantity": 11.0}, "crop": {...}}
+    misreads per pass: "primary" is the page reading, "crop" the zoomed re-read.
+    legibility: {"key": "partly_legible"} for the page reading, {"crop:key": ...} for the re-read.
+    observed_type: what the page reading says the document is (default: the truth)."""
 
     def __init__(self, sd: SynthDoc, errors: dict | None = None, legibility: dict | None = None,
-                 verifier_truthful: bool = True, languages: list[str] | None = None, handwriting: bool = False,
-                 overall_legibility: str = "clear", doc_index: dict | None = None, drop_lines: dict | None = None):
+                 languages: list[str] | None = None, handwriting: bool = False,
+                 overall_legibility: str = "clear", doc_index: dict | None = None, drop_lines: dict | None = None,
+                 observed_type: str | None = None):
         self.sd = sd
         self.errors = errors or {}
         self.legibility = legibility or {}
-        self.verifier_truthful = verifier_truthful
+        self.observed_type = observed_type
         self.languages = languages or (["english", "hindi"] if sd.doc_type == "lr" or sd.bucket == "bilingual" else ["english"])
         self.handwriting = handwriting
         self.overall_legibility = overall_legibility
         self.doc_index = doc_index  # triage: {page: document number} for batch-scan tests
-        self.drop_lines = drop_lines or {}  # {"secondary": [1]}: that reading misses row 1
+        self.drop_lines = drop_lines or {}  # {"primary": [1]}: the page reading misses row 1
 
     def _truth(self, key: str):
         if key.startswith("line_items["):
@@ -74,24 +77,21 @@ class TruthResponder:
                                "document_index": (self.doc_index or {}).get(i, 1)}
                               for i in range(1, max(1, sum(1 for b in content if b.get("type") == "image")) + 1)]}
         if pass_name == "primary":
-            out = {"document_type_observed": self.sd.doc_type, "languages": self.languages,
+            names = set(schema["properties"]["fields"]["properties"])  # answer the schema it was given
+            spec = max(SPECS.values(), key=lambda sp: len(names & {f.name for f in sp.fields}))
+            out = {"document_type_observed": self.observed_type or self.sd.doc_type, "languages": self.languages,
                    "handwriting_present": self.handwriting, "overall_legibility": self.overall_legibility,
                    "anomalies": [],
                    "fields": {f.name: self._cell("primary", f.name, f.type, True) for f in spec.fields}}
             if spec.line_fields:
                 out["line_items"] = []
                 for i in range(len(self.sd.lines)):
+                    if i in self.drop_lines.get("primary", []):
+                        continue
                     page, bb = self.sd.boxes.get(f"line_items[{i}]", (1, None))
                     out["line_items"].append({"page": page, "row_bbox": bb or {"x0": 0, "y0": 0, "x1": 0, "y1": 0},
                                               "cells": {f.name: self._cell("primary", f"line_items[{i}].{f.name}", f.type, False)
                                                         for f in spec.line_fields}})
-            return out
-        if pass_name == "secondary":
-            out = {"fields": {f.name: self._cell("secondary", f.name, f.type, False) for f in spec.fields}}
-            if spec.line_fields:
-                out["line_items"] = [{f.name: self._cell("secondary", f"line_items[{i}].{f.name}", f.type, False)
-                                      for f in spec.line_fields} for i in range(len(self.sd.lines))
-                                     if i not in self.drop_lines.get("secondary", [])]
             return out
         if pass_name == "crop":
             import re as _re
@@ -110,24 +110,4 @@ class TruthResponder:
                 reads.append({"crop": int(m.group(1)), "value": _value_str(ftype, v),
                               "raw_text": _as_printed(key, ftype, v), "legibility": leg})
             return {"reads": reads}
-        if pass_name == "verify":
-            text = "\n".join(b.get("text", "") for b in content if b.get("type") == "text")
-            verdicts = []
-            for line in text.splitlines():
-                if not line.startswith('- key "'):
-                    continue
-                key = line.split('"')[1]
-                t = self._truth(key)
-                a, b = self._val("primary", key), self._val("secondary", key)
-                if not self.verifier_truthful:
-                    choice = "A"
-                elif a == t:
-                    choice = "A"
-                elif b == t:
-                    choice = "B"
-                else:
-                    choice = "neither"
-                verdicts.append({"key": key, "choice": choice, "value_as_printed": _value_str("number", t) if isinstance(t, float) else str(t or ""),
-                                 "certain": True, "reason": "read from crop"})
-            return {"verdicts": verdicts}
         raise ValueError(pass_name)

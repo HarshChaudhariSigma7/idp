@@ -1,10 +1,16 @@
-"""Third, blind reading of chosen fields from zoomed crops, plus majority voting.
+"""The second, independent reading: zoomed crops of exactly the fields nothing else could prove.
 
-Pass A and pass B see whole pages. When they disagree, or when the document is hard (handwriting,
-Indic script, poor scan), each field is read a third time from a tight, zoomed crop of an
-ink-enhanced variant of the page. The crop reader is never shown the earlier readings, so it
-cannot be anchored by them. Two of three agreeing readings pick the value; the field still goes
-to a person whenever any reading dissented.
+After the page reading, deterministic evidence (evidence.py) proves most values for free. The
+rest - high-stakes values without proof, anything not clearly legible, and on hard documents every
+present value - are re-read in ONE request: each crop is cut around the location the first
+reading reported, from an ink-enhanced variant of the original pixels, and read by a different
+model that is never shown the first reading. Two readings that agree are strong evidence; two that
+differ go to a person with both values on screen (no third model call). A crop that no longer
+contains a value also catches a value the first reading invented.
+
+Basis: zooming into small regions lifts multimodal models' reading of fine print (Zhang et al.,
+ICLR 2025); two structurally different readings separate right from wrong extractions where
+logprobs, verbalised confidence and repeated sampling do not (ExtractConf, 2026).
 """
 from __future__ import annotations
 
@@ -15,8 +21,7 @@ from sereno.extraction.llm import LLMClient, LLMResult, image_block, text_block
 from sereno.extraction.normalize import normalise, values_agree
 from sereno.extraction.result import ExtractedDoc, FieldValue
 from sereno.ingest.loader import encode_jpeg
-
-MAX_CROPS = 24
+from sereno.ingest.preprocess import fit_long_edge
 
 CROP_SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["reads"],
@@ -28,21 +33,24 @@ CROP_SCHEMA = {
 }
 
 CROP_SYSTEM = """\
-You read small zoomed crops cut from Indian business documents (invoices, lorry receipts, GRNs).
-For each numbered crop you are told which field or column to read. Read ONLY that item, directly
-from the pixels, character by character. You are not told what anyone else read, so read it fresh.
-- value: normalised (numbers: digits with "." decimal, no commas or currency; dates YYYY-MM-DD,
-  Indian dates are day-first; codes uppercase without spaces; Indic numerals converted to 0-9).
+You read values from zoomed images cut from Indian business documents (GST invoices, lorry
+receipts, purchase orders, goods receipt notes). Each numbered item names one field or one column
+of a line-item row and the image to read it from. Read ONLY that item, directly from the pixels,
+character by character. Nobody else's reading is shown to you: read it fresh.
+- value: normalised. Numbers: digits with "." as decimal separator, no commas or currency
+  (Indian grouping 1,23,456.00 is 123456.00). Dates: YYYY-MM-DD; Indian dates are day-first.
+  Codes (GSTIN, PAN, IFSC, HSN, vehicle, e-way bill): uppercase, no spaces. Indic numerals -> 0-9.
 - raw_text: exactly as printed or written, including Devanagari.
-- legibility: be honest; "partly_legible" if any character is uncertain; "illegible" if you cannot
-  read it; "not_present" if the item is not in the crop. Never guess a value.
-For a line-item crop, the whole row is shown: read only the named column of that row.
+- legibility: "partly_legible" if any character is uncertain; "illegible" if present but
+  unreadable; "not_present" if the item is not in the image. Never guess a value.
+For a line-item row image, read only the named column of that row.
+Look-alikes need care: 0/O/D, 1/I/7, 5/S, 8/B, 2/Z in codes; 3/8, 1/7, 4/9 in handwriting.
 """
 
 
 def ink_variant(img: np.ndarray) -> np.ndarray:
-    """Grey, locally contrast-equalised, slightly sharpened: a third view that differs from both the
-    colour-enhanced page (pass A) and the untouched original (pass B)."""
+    """Grey, locally contrast-equalised, slightly sharpened: differs from the colour-enhanced page
+    the first reading saw, so the two readings don't share preprocessing artefacts."""
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if img.ndim == 3 else img
     gray = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(gray)
     blur = cv2.GaussianBlur(gray, (0, 0), 1.0)
@@ -67,32 +75,60 @@ def _crop(img: np.ndarray, bbox: dict, row: bool) -> np.ndarray | None:
     return crop
 
 
-def run_crop_reads(llm: LLMClient, fields: list[FieldValue], pages, model: str) -> tuple[LLMResult | None, dict]:
-    """Returns (llm result, {field key: (value, raw_text, legibility)})."""
+def needs_reread(fv: FieldValue, hard: bool) -> bool:
+    if fv.verified_by or fv.code_filled:
+        return False
+    if fv.value is None:
+        return fv.legibility in ("illegible", "partly_legible")  # present but not read: try zoomed
+    return (fv.spec.high_stakes or hard or fv.legibility != "clear" or fv.raw_consistent is False
+            or fv.unparseable)
+
+
+def select_targets(doc: ExtractedDoc, hard: bool, limit: int) -> list[FieldValue]:
+    pool = [f for f in doc.all_fields() if needs_reread(f, hard)]
+    pool.sort(key=lambda f: (not f.spec.high_stakes, f.legibility == "clear", f.line_index is not None,
+                             f.line_index or 0))
+    return pool[:limit]
+
+
+def run_crop_reads(llm: LLMClient, fields: list[FieldValue], pages, model: str,
+                   effort: str | None = None) -> tuple[LLMResult | None, dict]:
+    """One request for all targets. Each distinct region is sent once (a line-item row serves all
+    its columns); a value with no location is read from the full page. Returns
+    (result, {field key: (value, raw_text, legibility)})."""
     by_page = {p.page_no: p for p in pages}
     variants: dict[int, np.ndarray] = {}
     content: list[dict] = []
+    regions: dict[tuple, int] = {}
     index: dict[int, FieldValue] = {}
     for fv in fields:
-        if len(index) >= MAX_CROPS or not fv.bbox or fv.page not in by_page:
+        page_no = fv.page if fv.page in by_page else (min(by_page) if len(by_page) == 1 else None)
+        if page_no is None:
             continue
-        if fv.page not in variants:
-            variants[fv.page] = ink_variant(by_page[fv.page].original)
-        crop = _crop(variants[fv.page], fv.bbox, row=fv.line_index is not None)
-        if crop is None:
-            continue
+        if page_no not in variants:
+            variants[page_no] = ink_variant(by_page[page_no].original)
+        region = (page_no, tuple(round(v, 4) for v in fv.bbox.values()) if fv.bbox else None)
+        if region not in regions:
+            img = (_crop(variants[page_no], fv.bbox, row=fv.line_index is not None) if fv.bbox
+                   else fit_long_edge(variants[page_no], 2000))
+            if img is None:
+                continue
+            regions[region] = len(regions) + 1
+            what = "a zoomed region" if fv.bbox else f"the full page {page_no}"
+            content.append(text_block(f"Image {regions[region]} ({what}):"))
+            content.append(image_block(encode_jpeg(img, 92), "image/jpeg"))
         k = len(index) + 1
         what = (f"line {fv.line_index + 1}, column '{fv.spec.label}'" if fv.line_index is not None
                 else f"the field '{fv.spec.label}'")
         hint = f" ({fv.spec.hint})" if fv.spec.hint else ""
-        content.append(text_block(f'Crop {k} [key "{fv.key}"]: read {what} [{fv.spec.type}]{hint}.'))
-        content.append(image_block(encode_jpeg(crop, 92), "image/jpeg"))
+        content.append(text_block(f'Crop {k} [key "{fv.key}"]: from image {regions[region]}, read {what} '
+                                  f'[{fv.spec.type}]{hint}.'))
         index[k] = fv
     if not index:
         return None, {}
-    content.append(text_block("Return one read per crop, using the crop numbers."))
+    content.append(text_block("Return one read per numbered item, using the item numbers."))
     res = llm.structured(pass_name="crop", model=model, system=CROP_SYSTEM, content=content, schema=CROP_SCHEMA,
-                         max_tokens=16000)
+                         max_tokens=16000, effort=effort)
     out = {}
     for r in res.data.get("reads") or []:
         fv = index.get(r.get("crop"))
@@ -104,43 +140,32 @@ def run_crop_reads(llm: LLMClient, fields: list[FieldValue], pages, model: str) 
     return res, out
 
 
-def apply_votes(doc: ExtractedDoc, reads: dict) -> list[FieldValue]:
-    """Majority vote over A (pass A), B (pass B) and C (crop). Returns fields still unresolved."""
+def apply_reads(doc: ExtractedDoc, reads: dict) -> list[FieldValue]:
+    """Compare each zoomed reading with the page reading. Returns the fields that differ."""
     by_key = doc.by_key()
-    unresolved = []
-    for key, (c_val, c_raw, c_leg) in reads.items():
+    differ = []
+    for key, (z_val, z_raw, z_leg) in reads.items():
         fv = by_key.get(key)
         if fv is None:
             continue
-        fv.third_value = c_val
-        t = fv.spec.type
-        a = fv.value
-        b = fv.alt_value if fv.double_read else a
-        if c_leg == "illegible":
-            fv.votes = "illegible on zoom"
+        fv.double_read = True
+        if z_leg == "illegible":
+            fv.zoom_illegible = True
             fv.legibility = "partly_legible" if fv.legibility == "clear" else fv.legibility
-            if fv.agreement is False:
-                unresolved.append(fv)
+            fv.agreement = fv.value is None
             continue
-        ab, ac, bc = values_agree(t, a, b), values_agree(t, a, c_val), values_agree(t, b, c_val)
-        if ab and ac:
-            fv.votes = "3/3"
-            fv.evidence.append("3 of 3 readings agree")
-        elif ac or bc:
-            winner = a if ac else b
-            fv.votes = "2/3"
-            fv.evidence.append("2 of 3 readings agree")
-            if not values_agree(t, fv.value, winner):
-                fv.alt_value, fv.value = fv.value, winner
-                fv.raw_text = c_raw or fv.raw_text
-            fv.agreement = False  # a reading dissented: a person confirms
-        elif ab:
-            fv.votes = "2/3"
-            fv.agreement = False
-            fv.alt_value = c_val
-            fv.evidence.append("zoomed re-read differs")
+        if fv.value is None and z_val is not None:
+            # the page reading missed it; the zoomed reading found it: a person confirms the find
+            fv.value, fv.raw_text, fv.agreement = z_val, z_raw, False
+            fv.alt_value = None
+            fv.evidence.append("found on zoom")
+            differ.append(fv)
+            continue
+        if values_agree(fv.spec.type, fv.value, z_val):
+            fv.agreement = True
+            fv.evidence.append("confirmed on zoom")
         else:
-            fv.votes = "1/1/1"
-            fv.agreement = False
-            unresolved.append(fv)
-    return unresolved
+            fv.agreement, fv.alt_value = False, z_val
+            fv.evidence.append("zoomed reading differs" if z_val is not None else "not found on zoom")
+            differ.append(fv)
+    return differ

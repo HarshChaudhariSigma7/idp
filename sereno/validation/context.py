@@ -128,11 +128,6 @@ def row_count_checks(doc: ExtractedDoc) -> list[CheckResult]:
                             f"{n} line items, as the e-invoice QR states" if ok else
                             f"The e-invoice QR says {qr} line items but {n} were read: a row may be missing or split",
                             [anchor], "error")]
-    b = doc.row_counts.get("secondary")
-    if b is not None and b != n:
-        return [CheckResult("line_count", "fail",
-                            f"The two independent readings found {n} and {b} line items: a row may be missing or split",
-                            [anchor], "error")]
     return []
 
 

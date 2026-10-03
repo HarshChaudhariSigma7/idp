@@ -19,11 +19,11 @@ class FieldValue:
     page: int | None = None
     bbox: dict | None = None
     # --- signals filled by the pipeline ---
-    double_read: bool = False           # was this field re-read by the second pass?
-    alt_value: Any = None               # second-pass value
-    agreement: bool | None = None       # A == B ?
-    verifier_choice: str | None = None  # A | B | neither | unreadable
-    verifier_certain: bool | None = None
+    verified_by: list = field(default_factory=list)  # code | arithmetic | text_layer | records (evidence.py)
+    double_read: bool = False           # re-read from a zoomed crop by a second model?
+    alt_value: Any = None               # the other reading when they differ (zoomed read, QR, repair source)
+    agreement: bool | None = None       # page reading == zoomed reading ?
+    zoom_illegible: bool = False        # the zoomed re-read could not read it either
     raw_consistent: bool | None = None  # does raw_text parse to value?
     in_text_layer: bool | None = None   # digital PDFs: value literally present in the text layer
     format_ok: bool | None = None       # checksum / regex validity
@@ -33,9 +33,6 @@ class FieldValue:
     code_source: str | None = None      # einvoice_qr | upi_qr | barcode
     code_agrees: bool | None = None
     code_filled: bool = False           # value came from the code because nothing legible was printed
-    # --- third blind read (zoomed crops) and voting ---
-    third_value: Any = None
-    votes: str | None = None            # e.g. "3/3", "2/3", "1/1/1"
     # --- arithmetic-guided repair / master data ---
     suggested_value: Any = None
     suggestion_reason: str | None = None
@@ -59,7 +56,7 @@ class ExtractedDoc:
     anomalies: list[str] = field(default_factory=list)
     observed_type: str | None = None
     codes: list = field(default_factory=list)          # CodeReading objects found on the pages
-    row_counts: dict = field(default_factory=dict)     # {"primary": n, "secondary": m, "qr": k}
+    row_counts: dict = field(default_factory=dict)     # {"qr": k}: line items a signed code declares
 
     def v(self, name: str):
         f = self.header.get(name)

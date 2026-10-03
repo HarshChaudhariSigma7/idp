@@ -84,12 +84,12 @@ def seed_demo(tenant_id: str, n: str = "12", review: str = "yes", leave_open: st
         if i % 3 == 1 and sd.lines:
             errors = {"primary": {"line_items[0].quantity": sd.lines[0]["quantity"] + 1}}
         elif i % 3 == 2 and sd.doc_type == "invoice":
-            errors = {"primary": {"grand_total": sd.truth["grand_total"] + 100}, "secondary": {"grand_total": sd.truth["grand_total"] + 100}}
+            errors = {"primary": {"grand_total": sd.truth["grand_total"] + 100}}
         elif hw and sd.doc_type == "lr":
             errors = {"primary": {"charged_weight_kg": sd.truth["charged_weight_kg"] + 10}}
         if kind == "einvoice_misread":  # both readings misread one character; the signed QR catches it
             g = sd.truth["supplier_gstin"]
-            errors = {p: {"supplier_gstin": g[:4] + ("8" if g[4] != "8" else "3") + g[5:]} for p in ("primary", "secondary")}
+            errors = {p: {"supplier_gstin": g[:4] + ("8" if g[4] != "8" else "3") + g[5:]} for p in ("primary", "crop")}
         set_llm(FakeLLM(TruthResponder(sd, errors=errors, handwriting=hw)))
         data = sd.pdf if sd.pdf else to_jpeg_bytes(sd.image)
         with session_scope() as s:

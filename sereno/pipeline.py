@@ -1,5 +1,6 @@
-"""End-to-end document processing: ingest -> pre-check -> correct -> triage -> route model ->
-pass A -> pass B -> verify -> validate -> score -> route fields -> persist -> audit."""
+"""End-to-end document processing: ingest -> (batch split) -> type from free signals -> pre-check ->
+correct -> page reading -> deterministic verification -> zoomed re-read of unproven values ->
+arithmetic repair -> score -> route fields to people -> persist -> audit."""
 from __future__ import annotations
 
 import hashlib
@@ -7,6 +8,7 @@ import logging
 import random
 import re
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -19,7 +21,7 @@ from sereno import masterdata
 from sereno.config import get_settings
 from sereno.confidence.scorer import score_document
 from sereno.db import session_scope
-from sereno.extraction import codes, crossread, extractor, repair
+from sereno.extraction import codes, crossread, doctype, evidence, extractor, repair
 from sereno.extraction.doc_specs import SPECS, TRIAGE_SCHEMA, spec_with_extras
 from sereno.extraction.llm import LLMClient, LLMError, LLMRefusal, LLMResult, get_llm, image_block, text_block
 from sereno.extraction.prompts import PROMPT_VERSION, TRIAGE_SYSTEM
@@ -145,7 +147,7 @@ def _enter_review(s, doc: Document, tenant: Tenant) -> None:
 
 def _triage(llm: LLMClient, pages: list[loader.LoadedPage], model: str) -> LLMResult:
     content = []
-    edge = 1200 if len(pages) <= 6 else 700  # batch scans: every page, smaller, to find document boundaries
+    edge = 1000 if len(pages) <= 6 else 700  # type, rotation and page boundaries need little resolution
     for p in pages[:40]:
         content.append(text_block(f"Page {p.page_no}:"))
         content.append(image_block(loader.encode_jpeg(preprocess.fit_long_edge(p.image, edge), 85), "image/jpeg"))
@@ -154,7 +156,39 @@ def _triage(llm: LLMClient, pages: list[loader.LoadedPage], model: str) -> LLMRe
                           schema=TRIAGE_SCHEMA, max_tokens=4000, effort="low")
 
 
-def process_document(document_id: str, llm: LLMClient | None = None) -> None:
+GUESS_MIN_DOCS, GUESS_MIN_SHARE = 20, 0.85
+
+
+def _guess_type(tenant_id: str) -> str | None:
+    """The company's dominant document type, when its recent history makes the guess safe. A wrong
+    guess costs a repeated page reading; below ~85% the cheap triage call is the better bet."""
+    with session_scope() as s:
+        recent = s.execute(select(Document.doc_type).where(Document.tenant_id == tenant_id, Document.doc_type.is_not(None))
+                           .order_by(Document.created_at.desc()).limit(200)).scalars().all()
+    if len(recent) < GUESS_MIN_DOCS:
+        return None
+    top, n = Counter(recent).most_common(1)[0]
+    return top if top in SPECS and n / len(recent) >= GUESS_MIN_SHARE else None
+
+
+def _extra_fields(s, tenant_id: str, doc_type: str) -> list[dict]:
+    """Custom fields from every active template of this type, so they are read even before the
+    vendor is known (scans without a QR code)."""
+    out, seen = [], set()
+    for t in s.execute(select(Template).where(Template.tenant_id == tenant_id, Template.doc_type == doc_type,
+                                              Template.status == "active")).scalars():
+        for e in t.extra_fields or []:
+            if e.get("name") not in seen:
+                seen.add(e.get("name"))
+                out.append(e)
+    return out[:20]
+
+
+def process_document(document_id: str, llm: LLMClient | None = None, type_hint: str | None = None) -> None:
+    """Call budget (docs/ARCHITECTURE.md): one page reading; one zoomed re-read only for values
+    nothing else could prove; a cheap triage call only when free signals can't name the type or a
+    multi-page scan needs splitting; a repeat reading only when a guessed type was wrong. Typical:
+    1 call for a digital PDF or e-invoice, 1-2 for a scan of a known type."""
     st = get_settings()
     llm = llm or get_llm()
     store = get_store()
@@ -163,11 +197,12 @@ def process_document(document_id: str, llm: LLMClient | None = None) -> None:
         doc = s.get(Document, document_id)
         if doc is None or doc.status not in ("uploaded", "processing", "failed"):
             return
-        doc.status, doc.status_message = "processing", "Reading document…"
+        doc.status, doc.status_message = "processing", "Reading…"
         tenant_id, declared, parent_id = doc.tenant_id, doc.declared_type, doc.parent_id
         # idempotent on retry: derived rows are rebuilt; extraction_runs are kept (they are the log)
         for model in (Page, ExtractedField, ValidationResult):
             s.query(model).filter(model.document_id == document_id).delete(synchronize_session=False)
+        own = masterdata.own_gstins(s.get(Tenant, tenant_id))
     audit.record("document.processing_started", tenant_id=tenant_id, object_type="document", object_id=document_id)
 
     try:
@@ -184,37 +219,48 @@ def process_document(document_id: str, llm: LLMClient | None = None) -> None:
 
     cost = 0.0
     runs: list[tuple[str, LLMResult | None, str, str | None]] = []
+    text_all = "\n".join(p.text or "" for p in loaded.pages if p.native_text)
 
-    # --- triage (type, rotation, languages, handwriting, issuer) --------------------------------
+    # --- 1. one document or a batch, and what type? Free signals first; a cheap low-resolution
+    # triage call only when they can't tell (batch scans, unknown scans) -------------------------
+    code_readings = codes.read_codes([(p.page_no, p.image) for p in loaded.pages[:6]], st.einvoice_public_keys_pem)
+    free_type = (declared if declared in SPECS else
+                 "invoice" if any(r.source == "einvoice_qr" for r in code_readings) else
+                 doctype.from_text(text_all) or (type_hint if type_hint in SPECS else None))
+    multi = len(loaded.pages) > 1 and parent_id is None
+    local = doctype.local_groups([p.text for p in loaded.pages]) if (multi and loaded.is_digital) else None
+    guessed = free_type is None and not multi and _guess_type(tenant_id)
+    need_triage = (multi and local is None and not (loaded.is_digital and len(loaded.pages) <= 4)) or \
+                  (free_type is None and not guessed)
     triage = None
-    # multi-page files always get triage: they may be batch scans of several documents
-    need_triage = declared == "auto" or not loaded.is_digital or (len(loaded.pages) > 1 and parent_id is None)
+    groups = local or [list(range(1, len(loaded.pages) + 1))]
     if need_triage:
         try:
             tr = _triage(llm, loaded.pages, st.model_triage)
             triage, cost = tr.data, cost + tr.cost_usd
             runs.append(("triage", tr, st.model_triage, None))
+            if multi:
+                groups = _document_groups(triage, len(loaded.pages))
         except LLMError as e:
             log.warning("triage failed for document %s: %s", document_id, e)
             runs.append(("triage", None, st.model_triage, str(e)))
-    groups = _document_groups(triage, len(loaded.pages))
     if len(groups) > 1 and parent_id is None:
         _persist_runs(document_id, runs)
-        _split_batch(document_id, raw, loaded.mime, groups)
+        _split_batch(document_id, raw, loaded.mime, groups, (triage or {}).get("document_type"))
         return
-    doc_type = declared if declared in SPECS else (triage or {}).get("document_type", "other")
+
+    doc_type = free_type or (triage or {}).get("document_type") or guessed or "invoice"
     if doc_type not in SPECS:
         _persist_runs(document_id, runs)
-        _finish_needs_human(document_id, doc_type=None,
-                            message="Needs your review — this doesn't look like an invoice, LR, PO, GRN or contract")
+        _finish_needs_human(document_id, doc_type=None, message="Not an invoice, LR, PO, GRN or contract")
         return
-    spec_base = SPECS[doc_type]
-    pages_in = loaded.pages[:spec_base.max_pages]
-    rotations = {p.get("page"): p.get("rotation_needed", 0) for p in (triage or {}).get("pages", [])}
-    if triage is None:  # model triage unavailable: fall back to the cheap sideways-page detector
-        rotations = {p.page_no: quality.quarter_turn_hint(p.image) for p in loaded.pages if not p.native_text}
+    pages_in = loaded.pages[:SPECS[doc_type].max_pages]
+    if triage:
+        rotations = {p.get("page"): p.get("rotation_needed", 0) for p in triage.get("pages", [])}
+    else:
+        rotations = {p.page_no: quality.quarter_turn_hint(p.image) for p in pages_in if not p.native_text}
 
-    # --- pre-check + auto-correct ---------------------------------------------------------------
+    # --- 3. pre-check + auto-correct (local) -----------------------------------------------------
     prepared: list[extractor.PreparedPage] = []
     page_rows = []
     page_buckets, unreadable = [], []
@@ -235,6 +281,9 @@ def process_document(document_id: str, llm: LLMClient | None = None) -> None:
         prepared.append(extractor.PreparedPage(p.page_no, enhanced, original, p.native_text, p.text, p.words))
         page_rows.append((p.page_no, enhanced, {"before": q0.as_dict(), "after": q1.as_dict(), "bucket": b}, applied))
 
+    issuer = ((triage or {}).get("issuer_gstin")
+              or next((r.fields.get("supplier_gstin") for r in code_readings if r.source == "einvoice_qr"), None)
+              or doctype.issuer_gstin(text_all, own))
     with session_scope() as s:
         doc = s.get(Document, document_id)
         for page_no, img, qd, applied in page_rows:
@@ -249,24 +298,16 @@ def process_document(document_id: str, llm: LLMClient | None = None) -> None:
         doc.quality = {"pages": [r[2]["before"] for r in page_rows],
                        "corrections": sorted({a.split(":")[0] for r in page_rows for a in r[3]}),
                        "truncated_pages": max(0, len(loaded.pages) - len(pages_in))}
-        langs = set((triage or {}).get("languages") or [])
-        if loaded.is_digital:
-            langs.add("english")
-            if any(_DEVANAGARI.search(p.text or "") for p in pages_in):
-                langs.add("hindi")
-        doc.languages = sorted(langs) or None
-        doc.has_handwriting = bool((triage or {}).get("handwriting_present"))
-        if triage and triage.get("issuer_gstin"):
-            doc.vendor_key = pseudonymise(triage["issuer_gstin"])
-        tenant = s.get(Tenant, doc.tenant_id)
+        if issuer:
+            doc.vendor_key = pseudonymise(issuer)
         template = None
         if doc.vendor_key:
-            template = s.execute(select(Template).where(Template.tenant_id == tenant.id, Template.vendor_key == doc.vendor_key,
+            template = s.execute(select(Template).where(Template.tenant_id == tenant_id, Template.vendor_key == doc.vendor_key,
                                                         Template.doc_type == doc_type, Template.status == "active")
                                  .order_by(Template.created_at.desc())).scalars().first()
         template_hints = template.hints if template else None
-        extra_fields = template.extra_fields if template else None
         doc.template_id = template.id if template else None
+        extra_fields = _extra_fields(s, tenant_id, doc_type)
         bucket = doc.quality_bucket
 
     audit.record("document.precheck", tenant_id=tenant_id, object_type="document", object_id=document_id,
@@ -277,90 +318,73 @@ def process_document(document_id: str, llm: LLMClient | None = None) -> None:
         _finish_unreadable(document_id, doc_type, unreadable[0][1], cost, t0)
         return
 
-    spec = spec_with_extras(doc_type, extra_fields)
+    # --- 4. the page reading (1 call) ------------------------------------------------------------
     langs = set((triage or {}).get("languages") or [])
-    handwriting = bool((triage or {}).get("handwriting_present"))
-    clean = (bucket == "digital" and langs <= {"english"} and not handwriting)
-    hard = bucket == "poor_scan" or handwriting or any(l not in ("english", "other") for l in langs)
-    model = st.model_clean if clean else st.model_complex
-    effort = st.extraction_effort_hard if hard else None
-    # Machine-readable codes (signed e-invoice QR, UPI QR, barcodes): exact data, decoded locally
-    code_readings = codes.read_codes([(p.page_no, p.original) for p in prepared], st.einvoice_public_keys_pem)
+    indic_text = bool(_DEVANAGARI.search(text_all))
+    hard_pre = (bucket == "poor_scan" or doc_type == "lr" or indic_text or bool((triage or {}).get("handwriting_present"))
+                or any(l not in ("english", "other") for l in langs))
+    model = st.model_complex if hard_pre else st.model_clean
+    effort = st.extraction_effort_hard if hard_pre else st.extraction_effort
+    edge = {"digital": st.page_edge_digital, "good_scan": st.page_edge_good}.get(bucket, st.max_image_long_edge)
 
-    def attempt(model_name: str) -> tuple[ExtractedDoc, list[CheckResult], int]:
+    def read_page(dt: str) -> ExtractedDoc:
         nonlocal cost
-        a = extractor.run_primary(llm, spec, prepared, model_name, st.max_image_long_edge, template_hints,
-                                  effort=effort if model_name == st.model_complex else None)
-        runs.append(("primary", a, model_name, None))
-        cost += a.cost_usd
-        d = extractor.parse_primary(spec, a.data)
-        b = extractor.run_secondary(llm, spec, prepared, model_name, st.max_image_long_edge)
-        runs.append(("secondary", b, model_name, None))
-        cost += b.cost_usd
-        disputed = extractor.apply_secondary(d, b.data)
-        extractor.ground_in_text_layer(d, prepared)
-        d.anomalies += codes.apply_codes(d, code_readings)
-        chk = run_checks(d, st.amount_tolerance_abs, st.amount_tolerance_rel)
-        return d, chk, len(disputed)
-
-    def crop_read(fields: list) -> dict:
-        nonlocal cost
-        res, reads = crossread.run_crop_reads(llm, fields, prepared, st.model_complex)
-        if res is not None:
-            runs.append(("crop", res, st.model_complex, None))
-            cost += res.cost_usd
-        return reads
+        spec = spec_with_extras(dt, extra_fields)
+        res, frames = extractor.run_primary(llm, spec, prepared, model, edge, template_hints, effort=effort)
+        runs.append(("primary", res, model, None))
+        cost += res.cost_usd
+        d = extractor.parse_primary(spec, res.data)
+        extractor.remap_locations(d, frames)
+        return d
 
     try:
-        doc_x, checks, n_disputed = attempt(model)
-        errors = [c for c in checks if c.failed and c.severity == "error"]
-        if model != st.model_complex and (n_disputed or errors):
-            # Escalate: the cheaper model is only trusted when everything reconciles.
-            doc_x, checks, n_disputed = attempt(st.model_complex)
-            model = st.model_complex
-        # 1. Third, blind reading from zoomed crops; majority vote
-        disputed = [f for f in doc_x.all_fields() if f.double_read and f.agreement is False]
-        crop_done: set[str] = set()
-        if st.crop_reads:
-            targets = _crop_targets(doc_x, disputed, hard)
-            if targets:
-                reads = crop_read(targets)
-                crop_done |= set(reads)
-                unresolved = crossread.apply_votes(doc_x, reads)
-                disputed = unresolved + [f for f in disputed if f.key not in reads]
-        # 2. Verifier only for disagreements voting could not settle
-        if disputed:
-            v = extractor.run_verifier(llm, doc_x, disputed, prepared, st.model_complex, st.max_image_long_edge)
-            runs.append(("verify", v, st.model_complex, None))
-            cost += v.cost_usd
-            extractor.apply_verifier(doc_x, v.data)
-        checks = run_checks(doc_x, st.amount_tolerance_abs, st.amount_tolerance_rel)
-        # 3. Figures don't reconcile: zoomed re-read of the implicated numbers + arithmetic-guided repair
+        doc_x = read_page(doc_type)
+        observed = doc_x.observed_type
+        if observed and observed != doc_type and declared not in SPECS:
+            if observed not in SPECS:
+                _persist_runs(document_id, runs)
+                _finish_needs_human(document_id, doc_type=None, message="Not an invoice, LR, PO, GRN or contract")
+                return
+            doc_type = observed  # the free signals guessed wrong: read again with the right fields
+            doc_x = read_page(doc_type)
+            with session_scope() as s:
+                s.get(Document, document_id).doc_type = doc_type
+        elif observed and observed != doc_type:
+            doc_x.anomalies.append(f"Uploaded as {SPECS[doc_type].label} but looks like "
+                                   f"{SPECS[observed].label if observed in SPECS else 'something else'}")
+
+        # --- 5. deterministic verification (free) ------------------------------------------------
+        extractor.ground_in_text_layer(doc_x, prepared)
+        doc_x.anomalies += codes.apply_codes(doc_x, code_readings)
+        with session_scope() as s:
+            ctx, _ = masterdata.build_context(s, s.get(Tenant, tenant_id), doc_x, document_id)
+        checks = run_checks(doc_x, st.amount_tolerance_abs, st.amount_tolerance_rel, ctx=ctx)
+        evidence.mark_verified(doc_x, checks)
+
+        # --- 6. one zoomed re-read of what nothing proved (0 or 1 call) --------------------------
+        hard = hard_pre or doc_x.handwriting or any(l not in ("english", "other") for l in doc_x.languages)
+        targets = crossread.select_targets(doc_x, hard, st.max_verify_items) if st.crop_reads else []
+        if targets:
+            res, reads = crossread.run_crop_reads(llm, targets, prepared, st.model_verify, st.verify_effort)
+            if res is not None:
+                runs.append(("crop", res, st.model_verify, None))
+                cost += res.cost_usd
+            crossread.apply_reads(doc_x, reads)
+            checks = run_checks(doc_x, st.amount_tolerance_abs, st.amount_tolerance_rel, ctx=ctx)
+
+        # --- 7. figures still don't reconcile: let the arithmetic pick between the readings ------
         if st.arithmetic_repair and repair.failing_arithmetic(checks):
             implicated = repair.implicated_numeric(doc_x, checks)
-            need = [f for f in implicated if f.key not in crop_done and f.bbox]
-            reread = crop_read(need) if (st.crop_reads and need) else {}
-            for key, (val, _raw, _leg) in reread.items():
-                doc_x.by_key()[key].third_value = val
-            evidence = {f.key: [(f.alt_value, "second reading"), (f.third_value, "zoomed re-read"),
-                                (f.code_value, "QR code")] for f in implicated}
-            backed, suggestion = repair.search(doc_x, checks, evidence, st.amount_tolerance_abs, st.amount_tolerance_rel)
+            proof = {f.key: [(f.alt_value, "zoomed reading"), (f.code_value, "QR code")] for f in implicated}
+            backed, suggestion = repair.search(doc_x, checks, proof, st.amount_tolerance_abs, st.amount_tolerance_rel)
             repair.apply(doc_x, backed, suggestion)
-            repaired = {r.key for r in backed}
-            for key, (val, _raw, _leg) in reread.items():
-                fv = doc_x.by_key()[key]
-                if key not in repaired and val is not None and not values_agree(fv.spec.type, fv.value, val):
-                    fv.votes, fv.agreement = "2/3", False  # the zoomed re-read dissents: a person decides
-                    fv.alt_value = fv.alt_value if fv.alt_value is not None else val
-                    fv.evidence.append("zoomed re-read differs")
-            if not backed and reread and all(v is not None and values_agree(doc_x.by_key()[k].spec.type, doc_x.by_key()[k].value, v)
-                                             for k, (v, _r, _l) in reread.items()):
-                doc_x.anomalies.append("A zoomed re-read confirms the printed figures: the document itself doesn't add up. "
-                                       "Query the vendor before booking it.")
+            if not backed and implicated and all(f.double_read and f.agreement for f in implicated):
+                doc_x.anomalies.append("A zoomed re-read confirms the printed figures: the document itself "
+                                       "doesn't add up. Query the vendor before booking it.")
     except LLMRefusal as e:
         runs.append(("primary", None, model, str(e)))
         _persist_runs(document_id, runs)
-        _finish_needs_human(document_id, doc_type, "Needs your review — automatic reading was declined for this document; please enter it manually")
+        _finish_needs_human(document_id, doc_type, "Automatic reading was declined for this document; enter it manually")
         return
     except LLMError as e:
         runs.append(("primary", None, model, str(e)))
@@ -375,17 +399,6 @@ def process_document(document_id: str, llm: LLMClient | None = None) -> None:
 
     _persist_runs(document_id, runs)
     _persist_extraction(document_id, doc_x, model, cost, t0, unreadable)
-
-
-def _crop_targets(doc_x: ExtractedDoc, disputed: list, hard: bool) -> list:
-    """Disputed fields first; on hard documents also every high-stakes value (header before lines)."""
-    out, seen = [], set()
-    pool = list(disputed) + ([f for f in doc_x.all_fields() if f.spec.high_stakes and f.value is not None] if hard else [])
-    for f in pool:
-        if f.key not in seen and f.bbox:
-            seen.add(f.key)
-            out.append(f)
-    return out[:crossread.MAX_CROPS]
 
 
 def _document_groups(triage: dict | None, n_pages: int) -> list[list[int]]:
@@ -422,7 +435,7 @@ def _subset(raw: bytes, mime: str, pages: list[int]) -> bytes:
     return buf.getvalue()
 
 
-def _split_batch(document_id: str, raw: bytes, mime: str, groups: list[list[int]]) -> None:
+def _split_batch(document_id: str, raw: bytes, mime: str, groups: list[list[int]], type_hint: str | None = None) -> None:
     """A batch scan holding several documents becomes one document per group of pages, each
     processed, reviewed and exported on its own."""
     child_ids = []
@@ -440,7 +453,7 @@ def _split_batch(document_id: str, raw: bytes, mime: str, groups: list[list[int]
             s.add(child)
             s.flush()
             get_store().put(DOCS, child.id, "source", data, child.blob_expires_at)
-            jobs.enqueue(s, "process_document", {"document_id": child.id})
+            jobs.enqueue(s, "process_document", {"document_id": child.id, "type_hint": type_hint})
             child_ids.append(child.id)
         parent.status = "split"
         parent.status_message = f"Batch scan split into {len(groups)} documents, each read separately"
@@ -494,6 +507,7 @@ def _persist_extraction(document_id: str, doc_x: ExtractedDoc, model: str, cost:
             doc.vendor_key = pseudonymise(doc_x.v(vf))
         ctx, doc.dedupe_key = masterdata.build_context(s, tenant, doc_x, doc.id)
         checks = run_checks(doc_x, st.amount_tolerance_abs, st.amount_tolerance_rel, ctx=ctx)
+        evidence.mark_verified(doc_x, checks)  # final state: a repair or a re-read may change what is proven
         _suggest_from_checks(doc_x, checks)
         for note in dict.fromkeys(doc_x.anomalies):
             checks.append(CheckResult("note", "note", str(note)[:500], [], "warn"))
@@ -517,7 +531,7 @@ def _persist_extraction(document_id: str, doc_x: ExtractedDoc, model: str, cost:
                 review_reason=sc.reason, reason_codes=sc.reason_codes, features=sc.features,
                 status="pending" if sc.needs_review else "auto", final_value=None,
                 suggested_value=fv.suggested_value, suggestion_reason=fv.suggestion_reason,
-                evidence=list(dict.fromkeys(fv.evidence)) or None))
+                evidence=list(dict.fromkeys(fv.evidence + evidence.tags(fv))) or None))
             if sc.needs_review:
                 flagged_labels.append(f"{fv.spec.label} (line {fv.line_index + 1})" if fv.line_index is not None else fv.spec.label)
         if unreadable_pages:
@@ -538,8 +552,9 @@ def _persist_extraction(document_id: str, doc_x: ExtractedDoc, model: str, cost:
             "qr_confirmed": sum(1 for f in allf if f.code_agrees and not f.code_filled),
             "qr_filled": sum(1 for f in allf if f.code_filled),
             "qr_mismatch": sum(1 for f in allf if f.code_agrees is False),
-            "votes_3of3": sum(1 for f in allf if f.votes == "3/3"),
-            "votes_split": sum(1 for f in allf if f.votes in ("2/3", "1/1/1")),
+            "proven": sum(1 for f in allf if f.verified_by),
+            "zoom_confirmed": sum(1 for f in allf if f.double_read and f.agreement),
+            "zoom_differs": sum(1 for f in allf if f.double_read and f.agreement is False),
             "repaired": sum(1 for f in allf if f.repaired),
             "suggestions": sum(1 for f in allf if f.suggested_value is not None),
             "master_matches": sum(1 for f in allf if f.master_match),
@@ -552,6 +567,9 @@ def _persist_extraction(document_id: str, doc_x: ExtractedDoc, model: str, cost:
             if unreadable_pages:
                 msg += f" · page {unreadable_pages[0][0]} unreadable: {unreadable_pages[0][1]}"
             doc.status_message = msg
+            # spot checks sample every document, flagged or not: the reviewer confirms every field,
+            # which gives unbiased labels at any threshold (eval/backtest.py calibrates on these)
+            doc.is_qa_sample = random.random() < st.qa_sample_rate
             _enter_review(s, doc, tenant)
         else:
             doc.status, doc.status_message = "ready", ready_message(doc.fields_total)
@@ -596,7 +614,7 @@ def _finish_unreadable(document_id: str, doc_type: str, reason: str, cost: float
     with session_scope() as s:
         doc = s.get(Document, document_id)
         tenant = s.get(Tenant, doc.tenant_id)
-        doc.status, doc.status_message = "unreadable", f"Couldn't read this document — {reason}"
+        doc.status, doc.status_message = "unreadable", f"Couldn't read this document: {reason}"
         doc.doc_type = doc_type
         doc.processed_at, doc.processing_ms, doc.cost_usd = utcnow(), int((time.monotonic() - t0) * 1000), round(cost, 4)
         _blank_fields(s, doc, doc_type, "Document unreadable: enter manually from the original or request a rescan")
@@ -628,7 +646,7 @@ def _finish_failed(document_id: str, message: str) -> None:
 
 @jobs.handler("process_document")
 def _job_process(payload: dict) -> None:
-    process_document(payload["document_id"])
+    process_document(payload["document_id"], type_hint=payload.get("type_hint"))
 
 
 @jobs.handler("process_document:failed")

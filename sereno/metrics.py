@@ -17,10 +17,15 @@ from pathlib import Path
 from sqlalchemy import func, select
 
 from sereno.config import get_settings
-from sereno.models import Correction, Document, ExtractedField, ExtractionRun, Page, Template, ValidationResult, utcnow
+from sereno.models import Correction, Document, ExtractedField, ExtractionRun, utcnow
 
 SECONDS_PER_FIELD_MANUAL = 8  # conservative manual keying time per field, used for "time saved"
 
+
+
+def _needed_review(d: Document) -> bool:
+    """Sent to a person because something was flagged (not merely picked for a spot check)."""
+    return bool(d.review_entered_at) and (not d.is_qa_sample or bool(d.fields_flagged))
 
 def _pct(n: float, d: float) -> float | None:
     return round(100.0 * n / d, 1) if d else None
@@ -46,7 +51,7 @@ def dashboard(s, tenant_id: str, days: int = 30) -> dict:
     today_docs = [d for d in docs if d.created_at >= today0]
     open_q = s.execute(select(Document).where(Document.tenant_id == tenant_id, Document.reviewed_at.is_(None),
                                               Document.status.in_(["needs_review", "unreadable"]))).scalars().all()
-    reviewed = [d for d in docs if d.reviewed_at and d.review_entered_at and not d.is_qa_sample]
+    reviewed = [d for d in docs if d.reviewed_at and _needed_review(d)]
     turn = [(d.reviewed_at - d.review_entered_at).total_seconds() / 60 for d in reviewed]
     on_time = [d for d in reviewed if d.review_due_at and d.reviewed_at <= d.review_due_at]
 
@@ -69,14 +74,14 @@ def dashboard(s, tenant_id: str, days: int = 30) -> dict:
     for d in docs:
         if d.doc_type:
             by_type[d.doc_type]["documents"] += 1
-            by_type[d.doc_type]["needed_review"] += int(bool(d.review_entered_at) and not d.is_qa_sample)
+            by_type[d.doc_type]["needed_review"] += int(_needed_review(d))
     return {
         "generated_at": now.isoformat(),
         "window_days": days,
         "today": {
             "processed": sum(1 for d in today_docs if d.processed_at),
             "received": len(today_docs),
-            "needed_review": sum(1 for d in today_docs if d.review_entered_at and not d.is_qa_sample),
+            "needed_review": sum(1 for d in today_docs if _needed_review(d)),
             "ready": sum(1 for d in today_docs if d.status in ("ready", "exported")),
         },
         "queue": {
@@ -99,7 +104,6 @@ def dashboard(s, tenant_id: str, days: int = 30) -> dict:
         },
         "time_saved_hours": round(auto_fields * SECONDS_PER_FIELD_MANUAL / 3600, 1),
         "conditions": conditions(s, docs),
-        "technology": technology(s, tenant_id, docs),
         "trend": trend_rows,
         "by_type": dict(by_type),
         "totals": {"documents": len(docs), "completed": len(done)},
@@ -175,11 +179,25 @@ def internal_metrics(s, days: int = 30) -> dict:
         "cost_usd_per_doc": round(statistics.mean([d.cost_usd for d in docs if d.cost_usd]), 4) if any(d.cost_usd for d in docs) else None,
         "model_calls": len(runs),
         "model_errors": sum(1 for r in runs if r.error),
+        "efficiency": efficiency(docs, runs, fields),
         "review": {"turnaround_p50_min": _q(turn, 0.5), "turnaround_p90_min": _q(turn, 0.9),
                    "on_time_pct": _pct(sum(1 for d in reviewed if d.review_due_at and d.reviewed_at <= d.review_due_at), len(reviewed)),
                    "seconds_per_field_p50": round(_q(sorted(per_field_ms), 0.5) / 1000, 1) if per_field_ms else None},
         "demo_readiness": demo_readiness(),
     }
+
+
+def efficiency(docs: list[Document], runs: list, fields: list) -> dict:
+    """The call budget in practice: calls per document, how many needed only the page reading,
+    and how many values were proven without a model (docs/ARCHITECTURE.md, "Call budget")."""
+    calls = Counter(r.document_id for r in runs if not r.error)
+    n = [calls.get(d.id, 0) for d in docs]
+    proven = sum(1 for f in fields if (f.features or {}).get("proven"))
+    reread = sum(1 for f in fields if (f.features or {}).get("agree") or (f.features or {}).get("disagree"))
+    return {"calls_per_doc": round(statistics.mean(n), 2) if n else None,
+            "one_call_pct": _pct(sum(1 for x in n if x == 1), len(n)),
+            "fields_proven_pct": _pct(proven, len(fields)),
+            "fields_reread_pct": _pct(reread, len(fields))}
 
 
 def _q(xs: list, q: float):
@@ -198,7 +216,7 @@ def demo_readiness() -> dict:
     return {"status": "ok", "run_at": rep.get("run_at"), "cells": rep.get("gate", [])}
 
 
-# --- accuracy by document condition + the technology behind it ----------------------------------
+# --- accuracy by document condition ---------------------------------------------------------------
 
 MIN_FIELDS_FOR_CLAIM = 200  # below this a percentage is shown as "building baseline", not a claim
 
@@ -208,18 +226,10 @@ def _vernacular(d: Document) -> bool:
 
 
 CONDITIONS = [
-    ("overall", "Overall accuracy", lambda d: True,
-     ["Two independent AI readings, a third on zoomed crops when they differ", "Signed GST e-invoice QR read as exact ground truth",
-      "Arithmetic repairs misreads only when another reading backs the fix"]),
-    ("printed", "Printed & digital", lambda d: not _vernacular(d) and not d.has_handwriting,
-     ["PDF text-layer cross-check on digital files", "Printed values checked against the signed e-invoice QR",
-      "GSTIN checksum, HSN, e-way, IRN and financial-year validation"]),
-    ("vernacular", "Vernacular", _vernacular,
-     ["Devanagari & regional script reading, strongest model only", "Indic numerals in every script and Hindi/Marathi months normalised",
-      "Hindi amount-in-words checked against the figures"]),
-    ("handwritten", "Handwritten", lambda d: bool(d.has_handwriting),
-     ["Three blind readings (page, strips, zoomed crop), majority vote", "Rate-per-unit and row-count checks catch missed lines",
-      "Unreadable pages refused before any guess"]),
+    ("overall", "All documents", lambda d: True),
+    ("printed", "Printed", lambda d: not _vernacular(d) and not d.has_handwriting),
+    ("vernacular", "Hindi & regional", _vernacular),
+    ("handwritten", "Handwritten", lambda d: bool(d.has_handwriting)),
 ]
 
 EVAL_BUCKETS = {"printed": ("digital", "good_scan", "printed", "poor_scan"), "vernacular": ("bilingual", "vernacular"),
@@ -254,7 +264,7 @@ def conditions(s, docs: list[Document]) -> list[dict]:
             x["corrected"] += 1
             x["caught"] += int(bool(flagged))
     out = []
-    for key, label, pred, tech in CONDITIONS:
+    for key, label, pred in CONDITIONS:
         sel = [d for d in done if pred(d)]
         f = sum(per_doc[d.id]["fields"] for d in sel)
         c = sum(per_doc[d.id]["corrected"] for d in sel)
@@ -270,63 +280,8 @@ def conditions(s, docs: list[Document]) -> list[dict]:
             "no_review_docs_pct": _pct(sum(1 for d in sel if d.fields_flagged == 0), len(sel)),
             "spot_check": spot_check_accuracy(s, [d for d in sel if d.is_qa_sample and d.reviewed_at]),
             "trend": [{"day": k, "accuracy": _pct(v[0] - v[1], v[0])} for k, v in sorted(daily.items())],
-            "benchmark": _benchmark(key), "technology": tech,
+            "benchmark": _benchmark(key),
         })
     return out
 
 
-def technology(s, tenant_id: str, docs: list[Document]) -> list[dict]:
-    """Live counters for each stage of the pipeline: what the machinery actually did."""
-    ids = [d.id for d in docs]
-    if not ids:
-        return []
-    pages = s.execute(select(Page.corrections_applied).where(Page.document_id.in_(ids))).scalars().all()
-    corr = Counter(c.split(":")[0] for cs in pages for c in (cs or []) if not c.endswith(":reverted"))
-    feats = s.execute(select(ExtractedField.features, ExtractedField.needs_review, ExtractedField.status)
-                      .where(ExtractedField.document_id.in_(ids))).all()
-    double = sum(1 for f, _, _ in feats if f and (f.get("agree") or f.get("disagree")))
-    disagree = sum(1 for f, _, _ in feats if f and f.get("disagree"))
-    human = sum(1 for _, _, st in feats if st in ("confirmed", "corrected"))
-    checks = s.execute(select(ValidationResult.status).where(ValidationResult.document_id.in_(ids),
-                                                             ValidationResult.stage == "extracted")).scalars().all()
-    runs = Counter(s.execute(select(ExtractionRun.pass_name).where(ExtractionRun.document_id.in_(ids),
-                                                                   ExtractionRun.pass_name.in_(("verify", "crop"))))
-                   .scalars().all())
-    ev: Counter = Counter()
-    for d in docs:
-        for k, v in (d.evidence_summary or {}).items():
-            if isinstance(v, int):
-                ev[k] += v
-    with_codes = sum(1 for d in docs if (d.evidence_summary or {}).get("codes"))
-    context = Counter(s.execute(select(ValidationResult.check_id).where(
-        ValidationResult.document_id.in_(ids), ValidationResult.stage == "extracted",
-        ValidationResult.check_id.in_(("duplicate", "vendor_bank_changed", "own_gstin")),
-        ValidationResult.status.in_(("fail", "warn")))).scalars().all())
-    models = Counter((d.model_used or "").replace("claude-", "") for d in docs if d.model_used)
-    ms = sorted(c.time_on_field_ms for c in s.execute(select(Correction).where(Correction.document_id.in_(ids))).scalars()
-                if c.time_on_field_ms)
-    templates = s.execute(select(func.count()).select_from(Template).where(Template.tenant_id == tenant_id,
-                                                                           Template.status == "active")).scalar() or 0
-    return [
-        {"step": "Quality pre-check", "value": len(pages), "unit": "pages checked",
-         "detail": f"{sum(1 for d in docs if d.status == 'unreadable')} refused as unreadable instead of guessed"},
-        {"step": "Auto-correction", "value": sum(corr.values()), "unit": "fixes applied",
-         "detail": ", ".join(f"{v} {k}" for k, v in corr.most_common(4)) or "none needed"},
-        {"step": "Machine-readable codes", "value": ev["qr_confirmed"] + ev["qr_filled"], "unit": "fields proven by QR/barcode",
-         "detail": f"{with_codes} document(s) carried a code · {ev['qr_filled']} filled where print was unreadable · "
-                   f"{ev['qr_mismatch']} print-vs-QR mismatches flagged"},
-        {"step": "Independent readings", "value": double, "unit": "fields read twice",
-         "detail": f"{ev['votes_3of3']} confirmed 3 of 3 on zoomed crops · " +
-                   (" · ".join(f"{v} {k}" for k, v in models.most_common()) or "")},
-        {"step": "Disagreement resolution", "value": disagree, "unit": "disagreements caught",
-         "detail": f"{ev['votes_split']} settled by a third reading, {runs['verify']} by a verifier; all shown to a person"},
-        {"step": "GST & arithmetic checks", "value": len(checks), "unit": "checks run",
-         "detail": f"{sum(1 for c in checks if c == 'fail')} mismatches stopped · {ev['repaired']} misreads repaired "
-                   f"from evidence · {ev['suggestions']} suggestions"},
-        {"step": "Company records", "value": ev["master_matches"] + sum(context.values()), "unit": "record checks hit",
-         "detail": f"{context['duplicate']} duplicates blocked · {context['vendor_bank_changed']} bank-change alerts · "
-                   f"{ev['master_matches']} matched your GSTINs/vendors"},
-        {"step": "Human confirmation", "value": human, "unit": "fields confirmed by people",
-         "detail": (f"median {round(ms[len(ms) // 2] / 1000, 1)}s per field" if ms else "no reviews yet") +
-                   (f" · {templates} vendor template(s) active" if templates else "")},
-    ]

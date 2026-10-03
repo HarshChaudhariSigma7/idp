@@ -172,8 +172,7 @@ def apply(doc: ExtractedDoc, repairs: list[Repair], suggestion: Repair | None) -
         fv.alt_value, fv.value = fv.value, r.value
         fv.repaired = True
         fv.agreement = False
-        fv.suggestion_reason = (f"Corrected from {_fmt(r.old)} to {_fmt(r.value)}: the {r.source} saw {_fmt(r.value)} "
-                                "and with it every total adds up")
+        fv.suggestion_reason = f"Corrected from {_fmt(r.old)} to {_fmt(r.value)}: the {r.source} agrees and the totals add up"
         fv.evidence.append("totals reconcile after correction")
     if suggestion is not None:
         fv = by_key[suggestion.key]
@@ -183,4 +182,6 @@ def apply(doc: ExtractedDoc, repairs: list[Repair], suggestion: Repair | None) -
 
 
 def _fmt(v) -> str:
-    return f"{v:,.2f}" if isinstance(v, (int, float)) else str(v)
+    if isinstance(v, (int, float)):
+        return f"{v:,.0f}" if float(v).is_integer() else f"{v:,.2f}"
+    return str(v)

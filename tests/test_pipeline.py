@@ -40,14 +40,14 @@ def test_clean_digital_invoice_is_ready_with_cheap_model(tenant_and_users):
     d = doc_of(doc_id)
     assert d.status == "ready", d.status_message
     assert d.quality_bucket == "digital" and d.is_digital
-    assert d.model_used == "claude-sonnet-5"
-    assert d.status_message.startswith("Ready to export")
+    assert d.model_used == "claude-sonnet-5-5"
+    assert d.status_message == "All figures checked and consistent"
     f = fields_of(doc_id)
     assert f["grand_total"].value == sd.truth["grand_total"]
     assert f["grand_total"].band == "high"
     assert all(not x.needs_review for x in f.values())
-    passes = [c["pass"] for c in llm.calls]
-    assert passes == ["triage", "primary", "secondary"]  # type unknown -> triage; clean -> no verifier
+    # the text layer names the type and proves the values: one model call in total
+    assert [c["pass"] for c in llm.calls] == ["primary"]
     with session_scope() as s:
         assert s.execute(select(ExtractionRun).where(ExtractionRun.document_id == doc_id)).scalars().all()
 
@@ -57,16 +57,15 @@ def test_scan_uses_strong_model_and_routes_only_the_disputed_field(tenant_and_us
     wrong = sd.lines[1]["quantity"] + 10
     doc_id, llm = run(sd, tenant_and_users, errors={"primary": {"line_items[1].quantity": wrong}})
     d = doc_of(doc_id)
-    assert d.model_used == "claude-opus-5"
-    # the disagreement is settled by a blind third read of a zoomed crop, not by the verifier
-    assert [c["pass"] for c in llm.calls] == ["triage", "primary", "secondary", "crop"]
+    assert d.model_used == "claude-sonnet-5-5"
+    # unknown type on a new account: a cheap triage, one page reading, one zoomed re-read of the unproven
+    assert [c["pass"] for c in llm.calls] == ["triage", "primary", "crop"]
     f = fields_of(doc_id)
     q = f["line_items[1].quantity"]
-    # 2 of 3 readings restore the right value, but the field still goes to a human
+    # arithmetic picks the zoomed reading; a person still confirms the correction
     assert q.value == sd.lines[1]["quantity"] and q.needs_review and q.band == "low"
     assert d.status == "needs_review"
-    assert "2 of 3 independent readings" in q.review_reason
-    assert "2 of 3 readings agree" in (q.evidence or [])
+    assert "Corrected from" in q.review_reason
     # fields that both passes agreed on and that reconcile stay auto-accepted
     assert not f["invoice_number"].needs_review
     assert [k for k, x in f.items() if x.needs_review] == ["line_items[1].quantity"], _debug_flags(doc_id)
@@ -76,10 +75,8 @@ def test_scan_uses_strong_model_and_routes_only_the_disputed_field(tenant_and_us
 def test_correlated_misread_is_repaired_from_zoomed_reread(tenant_and_users):
     sd = make_invoice(random.Random(12), "good_scan")
     bad_total = sd.truth["grand_total"] + 1000
-    # both passes misread identically => self-consistency can't catch it; the arithmetic fails,
-    # the zoomed re-read sees the true total, and the repair makes every equation balance
-    doc_id, llm = run(sd, tenant_and_users, errors={"primary": {"grand_total": bad_total},
-                                                     "secondary": {"grand_total": bad_total}})
+    # the arithmetic fails, the zoomed re-read sees the true total, and the repair makes every equation balance
+    doc_id, llm = run(sd, tenant_and_users, errors={"primary": {"grand_total": bad_total}})
     d = doc_of(doc_id)
     f = fields_of(doc_id)
     assert "crop" in [c["pass"] for c in llm.calls]
@@ -95,7 +92,6 @@ def test_document_that_really_does_not_add_up(tenant_and_users):
     bad_total = sd.truth["grand_total"] + 1000
     # the zoomed re-read ALSO sees the bad total: the paper itself is wrong -> say so, don't "fix" it
     doc_id, _ = run(sd, tenant_and_users, errors={"primary": {"grand_total": bad_total},
-                                                   "secondary": {"grand_total": bad_total},
                                                    "crop": {"grand_total": bad_total}})
     d = doc_of(doc_id)
     f = fields_of(doc_id)
@@ -128,7 +124,7 @@ def test_bilingual_lr_routes_to_opus_and_extracts(tenant_and_users):
     sd = make_lr(random.Random(14), "carbon")
     doc_id, llm = run(sd, tenant_and_users)
     d = doc_of(doc_id)
-    assert d.doc_type == "lr" and d.model_used == "claude-opus-5"
+    assert d.doc_type == "lr" and d.model_used == "claude-opus-5-5"
     assert "hindi" in (d.languages or [])
     f = fields_of(doc_id)
     assert f["total_freight"].value == sd.truth["total_freight"]
@@ -137,8 +133,8 @@ def test_bilingual_lr_routes_to_opus_and_extracts(tenant_and_users):
 def test_review_flow_logs_corrections_and_updates_vendor_history(tenant_and_users):
     tid, users = tenant_and_users
     sd = make_invoice(random.Random(15), "good_scan")
-    # all three readings agree on the wrong rate, so only a person can fix it
-    doc_id, _ = run(sd, tenant_and_users, errors={"primary": {"line_items[0].rate": 1.0}, "secondary": {"line_items[0].rate": 1.0},
+    # both readings agree on the wrong rate, so only a person can fix it
+    doc_id, _ = run(sd, tenant_and_users, errors={"primary": {"line_items[0].rate": 1.0},
                                                    "crop": {"line_items[0].rate": 1.0}})
     with session_scope() as s:
         d = s.get(Document, doc_id)

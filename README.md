@@ -10,7 +10,8 @@ anything uncertain goes to a human, field by field. We never silently guess.
 | Area | State |
 |---|---|
 | Pipeline, validation, review UI, dashboard, exports, 3-way match, templates, security base | Built, 63 automated tests passing |
-| Accuracy engine: signed e-invoice QR, 3 blind readings + vote, evidence-backed repair, company records, batch split | Built; 17 scenario tests ([tests/test_accuracy_scenarios.py](tests/test_accuracy_scenarios.py)); QR decoding verified on real samples |
+| Accuracy engine: one page reading, deterministic proof, one zoomed re-read of what isn't proven, evidence-backed repair, company records, batch split | Built; scenario + call-budget tests ([tests/test_accuracy_scenarios.py](tests/test_accuracy_scenarios.py)); QR decoding verified on real samples |
+| Auto-accept thresholds | Certified from spot checks with a statistical guarantee ([sereno/eval/backtest.py](sereno/eval/backtest.py)); needs real reviewed volume before it can certify |
 | Real web documents (25: printed, handwritten, Hindi, sideways, blank traps) | All non-model stages tested; 5 real-world bugs found and fixed ([datasets/web_v1](datasets/web_v1/README.md)). Model accuracy on them: needs `ANTHROPIC_API_KEY` |
 | Accuracy on **real** documents | **Not measured yet.** No labelled real set has been run. Synthetic data proves plumbing only |
 | Demo gate | Closed for every document type × quality bucket until `reports/eval_latest.json` says otherwise |
@@ -34,12 +35,12 @@ seconds. Everything stays inside the folder (`./var`), bound to localhost only.
 | Log in as | You see |
 |---|---|
 | `cfo@demo.local` | dashboard, accuracy by condition, exports, 3-way match |
-| `reviewer@demo.local` | review queue with 4 documents waiting (keyboard: Enter, E, S, Ctrl+Enter) |
+| `reviewer@demo.local` | review queue (keyboard: ↑↓ move, Enter confirm, 1/2 pick a reading, type to fix, ⌘/Ctrl+Enter finish) |
 | `admin@demo.local` | users, tamper-evident audit trail, subprocessors |
 | `ops@demo.local` | internal metrics and the demo gate |
 
 One password and one authenticator entry work for all four (printed in the terminal, saved in
-`var/DEMO_LOGIN.txt`). Demo numbers are simulated and the app says so on every page.
+`var/DEMO_LOGIN.txt`). Demo numbers are simulated; a "Demo" tag in the header says so.
 
 - Read your own documents: put `ANTHROPIC_API_KEY=...` in `.env` (created on first run), restart. Gemini also works: set `SERENO_LLM_BACKEND=gemini` and `GEMINI_API_KEY=...` instead.
 - Real accuracy on 25 real web documents: `./run_local.sh --eval` (asks first; roughly $10-15 of API usage).
@@ -47,29 +48,33 @@ One password and one authenticator entry work for all four (printed in the termi
 
 ## How a document flows
 
+AI calls are the expensive, error-prone step, so the pipeline spends them only where nothing
+cheaper can decide. Typical budget: digital PDF or e-invoice **1 call**, scan of a known type
+**1-2 calls**, unknown-type scan on a new account **3 calls**.
+
 ```
 upload ─► encrypted temp store (TTL) ─► pre-check: DPI, skew, blur, contrast, ink, text layer
       ─► auto-correct: rotate, deskew, upscale, denoise, contrast, sharpen (logged per page)
-      ─► unreadable gate (on ORIGINAL pixels) ─► human with plain reason, no extraction attempt
-      ─► triage (type, rotation, languages, handwriting, issuer GSTIN, which pages belong to which
-         document) ─► a batch PDF of several invoices/LRs is split into one document each
+      ─► unreadable gate (on ORIGINAL pixels) ─► human with plain reason, no AI call
+      ─► document type for free: the type the user picked, a signed e-invoice QR, the PDF text,
+         or the company's usual type. A cheap triage call only for multi-page scans or a truly
+         unknown scan (it also splits batch files into one document each)
       ─► codes: GST e-invoice QR (signed JWT: GSTINs, number, date, total, item count, IRN), UPI QR,
-         barcodes, decoded locally at 1-3x. Exact data, no model error
-      ─► model routing: Sonnet only for clean English digital PDFs, Opus (effort xhigh when hard)
-      ─► pass A: full strict-JSON schema, enhanced images (+ PDF text layer), with field locations
-      ─► pass B: independent re-read of every field, different prompt, ORIGINAL pixels as zoomed strips
-      ─► pass C (hard docs / disagreements): BLIND read of each field's zoomed crop, ink-enhanced,
-         no labels or earlier answers ─► majority vote 3/3, 2/3; verifier only for 1/1/1 ties
-      ─► deterministic checks: line math (incl. rate per 100/1000), GST reconciliation, totals,
-         amount-in-words (English + Hindi), GSTIN checksum, financial year in the invoice number
-         vs date, row count vs QR, printed vs signed QR
-      ─► repair: when totals fail, re-read the implicated figures; fix only if a single unique value
-         makes every check pass AND another reading saw it; otherwise suggest (key S) or flag
-      ─► company records: own GSTINs (repair near-misses), vendor name/bank/number format history,
-         bank-change fraud alert, duplicate (issuer + number) block, auto-template after 3 reviews
-      ─► confidence per field = f(agreement, votes, codes, checks, quality, vendor history)
-      ─► field-level routing → review queue with 4h SLA, or "Ready to export"
-      ─► every model call, score, feature vector and human correction logged (the eval set)
+         barcodes, decoded locally. Exact data, no AI
+      ─► CALL 1, page reading: full strict-JSON schema with a location for every value; margins
+         trimmed, cached system prompt; Sonnet 5.5 for clean pages, Opus 5.5 for poor scans,
+         handwriting, Hindi and LRs. It also reports the type it sees (wrong guess: re-read)
+      ─► proof without AI: QR/barcode, exact arithmetic (qty × rate, line sums, GST, totals,
+         amount in words), the PDF text layer, company records. Proven values are done
+      ─► CALL 2 (only if something is unproven): one zoomed re-read of just those fields, by the
+         other model, on ink-enhanced crops. Agree: done. Disagree: a person picks (key 1 or 2)
+      ─► repair: when totals still fail, the arithmetic picks between the two readings; a fix is
+         applied only if one unique value balances every check AND a reading saw it
+      ─► company records: own GSTINs, vendor name/bank/number history, bank-change alert,
+         duplicate block, auto-template after 3 reviews
+      ─► confidence per field from evidence (never the model's own certainty) ─► review or ready
+      ─► spot checks: a random 5% of all documents get every field confirmed; these certify the
+         auto-accept thresholds (Learn then Test, exact binomial, document clustering corrected)
 ```
 
 ## Run manually (developers)
@@ -94,7 +99,7 @@ uses `SKIP LOCKED`; audit hash chain uses an advisory lock). SQLite is dev only.
 |---|---|---|
 | Every upload | Everything logged: model output, features, scores, corrections | automatic |
 | Continuous | Retention sweep deletes expired raw documents | automatic (worker) |
-| Weekly | Refit weights + thresholds from reviewer outcomes | `python -m sereno.eval.backtest --doc-type invoice [--apply]` |
+| Weekly | Refit weights, certify thresholds from spot checks | `python -m sereno.eval.backtest --doc-type invoice [--apply]` |
 | Before any demo / prompt change | Labelled eval, per bucket, gate | `python -m sereno.eval.run_eval eval_data/real` |
 | Monthly | Audit chain integrity | `python scripts/manage.py verify-audit` |
 
@@ -104,9 +109,11 @@ uses `SKIP LOCKED`; audit hash chain uses an advisory lock). SQLite is dev only.
 |---|---|
 | `sereno/ingest/` | loading (PDF/image, text layer), quality scoring, auto-correction |
 | `sereno/extraction/doc_specs.py` | field specs per doc type → strict JSON schemas (union-free, compiler-safe) |
-| `sereno/extraction/{prompts,extractor,llm}.py` | versioned prompts, passes A/B/verify, Claude client |
+| `sereno/extraction/{prompts,extractor,llm}.py` | versioned prompts, the page reading, Claude client (prompt caching, refusal fallback) |
+| `sereno/extraction/doctype.py` | document type and page grouping from free signals (no AI call) |
+| `sereno/extraction/evidence.py` | which values are proven without AI (QR, exact arithmetic, text layer, records) |
 | `sereno/extraction/codes.py` | e-invoice/UPI QR + barcode decoding, JWT parse/verify, code-vs-print |
-| `sereno/extraction/crossread.py` | blind zoomed-crop third reading and majority vote |
+| `sereno/extraction/crossread.py` | one zoomed re-read of the unproven fields |
 | `sereno/extraction/repair.py` | arithmetic-guided, evidence-backed misread repair and suggestions |
 | `sereno/masterdata.py` + `validation/context.py` | own GSTINs, vendor profiles, duplicates, bank-change, FY and row-count checks |
 | `sereno/validation/` | GST/arithmetic/format checks, GSTIN checksum, amount-in-words |
@@ -116,7 +123,7 @@ uses `SKIP LOCKED`; audit hash chain uses an advisory lock). SQLite is dev only.
 | `sereno/matching/three_way.py` | PO × GRN × invoice reconciliation |
 | `sereno/templates_onboarding.py` | "show me 3–5 examples" vendor templates |
 | `sereno/security/` | AES-256-GCM envelope crypto, auth + TOTP MFA, RBAC, hash-chained audit |
-| `sereno/eval/` | eval harness + demo gate, weekly backtest, synthetic generator |
+| `sereno/eval/` | eval harness + demo gate, certified-threshold backtest, synthetic generator |
 | `sereno/web/` | the app (no build step) |
 
 Docs: [architecture](docs/ARCHITECTURE.md) · [security & audit controls](docs/SECURITY.md) ·

@@ -102,7 +102,7 @@ class Document(Base):
     # HMAC(issuer GSTIN | document number): finds duplicates without storing either in clear
     dedupe_key: Mapped[str | None] = mapped_column(String(64), index=True)
     parent_id: Mapped[str | None] = mapped_column(String(36), index=True)  # set on documents split from a batch PDF
-    evidence_summary: Mapped[dict | None] = mapped_column(JSON)  # counts: qr fields, 3/3 votes, repairs ...
+    evidence_summary: Mapped[dict | None] = mapped_column(JSON)  # counts: qr fields, proven, zoom agreements, repairs ...
 
     pages: Mapped[list["Page"]] = relationship(back_populates="document", cascade="all, delete-orphan",
                                                order_by="Page.page_no")
@@ -128,7 +128,7 @@ class ExtractionRun(Base):
     __tablename__ = "extraction_runs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), index=True)
-    pass_name: Mapped[str] = mapped_column(String(24))  # triage | primary | secondary | verify
+    pass_name: Mapped[str] = mapped_column(String(24))  # triage | primary | crop
     model: Mapped[str] = mapped_column(String(64))
     served_model: Mapped[str | None] = mapped_column(String(64))
     prompt_version: Mapped[str] = mapped_column(String(32))

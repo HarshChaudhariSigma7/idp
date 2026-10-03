@@ -193,7 +193,8 @@ def _invoice(doc: ExtractedDoc, tol: Tol) -> list[CheckResult]:
                 ok = abs(total - taxable * (1 + rate_pct / 100)) <= max(LINE_TOL, total * Decimal("0.0005"))
             out.append(CheckResult(f"line_total:{i}", "pass" if ok else "fail",
                                    f"Line {i + 1}: line total {'is consistent' if ok else 'does not add up'}",
-                                   [line_key(i, n) for n in ("taxable_value", "line_total", "cgst_amount", "sgst_amount", "igst_amount")]))
+                                   [line_key(i, n) for n in ("taxable_value", "line_total", "cgst_amount", "sgst_amount", "igst_amount")],
+                                   details={"calc": str(taxable + tax), "printed": str(total)}))
 
     subtotal, gt = _d(doc.v("subtotal")), _d(doc.v("grand_total"))
     cgst, sgst, igst = _d(doc.v("cgst_amount")), _d(doc.v("sgst_amount")), _d(doc.v("igst_amount"))
@@ -222,7 +223,8 @@ def _invoice(doc: ExtractedDoc, tol: Tol) -> list[CheckResult]:
             out.append(CheckResult(f"tax_sum:{head}", "pass" if ok else "fail",
                                    f"{name} on lines {'matches' if ok else 'does not match'} the {name} total"
                                    + ("" if ok else f" ({_inr(s)} vs {_inr(hv)})"),
-                                   [head] + [line_key(i, head) for i in range(len(lines))]))
+                                   [head] + [line_key(i, head) for i in range(len(lines))],
+                                   details={"calc": str(s), "printed": str(hv)}))
 
     # Tax-rate reconciliation
     if subtotal is not None and subtotal > 0 and (cgst is not None or igst is not None):
@@ -313,7 +315,7 @@ def _invoice(doc: ExtractedDoc, tol: Tol) -> list[CheckResult]:
             out.append(CheckResult("amount_in_words", "pass" if ok else "fail",
                                    "Amount in words matches the total" if ok else
                                    f"Amount in words says {_inr(w)} but the total shows {_inr(gt)}",
-                                   ["amount_in_words", "grand_total"]))
+                                   ["amount_in_words", "grand_total"], details={"calc": str(w), "printed": str(gt)}))
     sg, bg = doc.v("supplier_gstin"), doc.v("buyer_gstin")
     if sg and bg and sg == bg:
         out.append(CheckResult("gstin_distinct", "fail", "Vendor and buyer GSTIN are the same; one was probably read from the wrong box",
@@ -355,7 +357,8 @@ def _lr(doc: ExtractedDoc, tol: Tol) -> list[CheckResult]:
         out.append(CheckResult("total_freight", "pass" if ok else "fail",
                                "Basic freight + other charges = total freight" if ok else
                                f"Basic freight + other charges comes to {_inr(calc)} but total shows {_inr(total)}",
-                               ["total_freight", "freight_amount", "other_charges"]))
+                               ["total_freight", "freight_amount", "other_charges"],
+                               details={"calc": str(calc), "printed": str(total)}))
     words = doc.v("amount_in_words")
     if words and total is not None:
         w = words_to_amount(words)
@@ -364,7 +367,8 @@ def _lr(doc: ExtractedDoc, tol: Tol) -> list[CheckResult]:
             out.append(CheckResult("amount_in_words", "pass" if ok else "fail",
                                    "Amount in words matches the total freight" if ok else
                                    f"Amount in words says {_inr(w)} but total freight shows {_inr(total)}",
-                                   ["amount_in_words", "total_freight"]))
+                                   ["amount_in_words", "total_freight"],
+                                   details={"calc": str(w), "printed": str(total)}))
     c1, c2 = doc.v("consignor_gstin"), doc.v("consignee_gstin")
     if c1 and c2 and c1 == c2:
         out.append(CheckResult("gstin_distinct", "fail", "Consignor and consignee GSTIN are identical; check both boxes",
@@ -387,20 +391,23 @@ def _po(doc: ExtractedDoc, tol: Tol) -> list[CheckResult]:
             ok = abs(calc - amt) <= max(LINE_TOL, abs(amt) * Decimal("0.0005"))
             out.append(CheckResult(f"line_math:{i}", "pass" if ok else "fail",
                                    f"Line {i + 1}: quantity × rate {'matches' if ok else 'does not match'} the amount",
-                                   [line_key(i, n) for n in ("quantity", "rate", "discount", "line_total")]))
+                                   [line_key(i, n) for n in ("quantity", "rate", "discount", "line_total")],
+                                   details={"calc": str(calc), "printed": str(amt)}))
     sub, gt = _d(doc.v("subtotal")), _d(doc.v("grand_total"))
     if doc.lines and sub is not None and all(a is not None for a in amounts):
         s = _sum(amounts)
         ok = tol.eq(s, sub)
         out.append(CheckResult("lines_sum_subtotal", "pass" if ok else "fail",
                                "Line amounts add up to the PO value" if ok else f"Lines add up to {_inr(s)} but PO shows {_inr(sub)}",
-                               ["subtotal"] + [line_key(i, "line_total") for i in range(len(doc.lines))]))
+                               ["subtotal"] + [line_key(i, "line_total") for i in range(len(doc.lines))],
+                               details={"lines_sum": str(s), "subtotal": str(sub)}))
     if sub is not None and gt is not None:
         calc = sub + _sum([_d(doc.v(n)) for n in ("cgst_amount", "sgst_amount", "igst_amount", "other_charges")])
         ok = tol.eq(calc, gt)
         out.append(CheckResult("grand_total", "pass" if ok else "fail",
                                "PO total adds up" if ok else f"PO value + taxes comes to {_inr(calc)} but total shows {_inr(gt)}",
-                               ["grand_total", "subtotal", "cgst_amount", "sgst_amount", "igst_amount", "other_charges"]))
+                               ["grand_total", "subtotal", "cgst_amount", "sgst_amount", "igst_amount", "other_charges"],
+                               details={"calc": str(calc), "printed": str(gt)}))
     out.append(_date_sanity(doc, "po_date"))
     return [c for c in out if c is not None]
 

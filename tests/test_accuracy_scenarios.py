@@ -20,13 +20,15 @@ from sereno.validation.context import CONFUSABLE
 from tests.test_validation import build, failed
 
 
-def process(sd, tenant_and_users, data=None, **kw):
+def process(sd, tenant_and_users, data=None, declared="auto", **kw):
     tid, users = tenant_and_users
-    set_llm(FakeLLM(TruthResponder(sd, **kw)))
+    llm = FakeLLM(TruthResponder(sd, **kw))
+    set_llm(llm)
     data = data or (sd.pdf if sd.pdf else to_jpeg_bytes(sd.image))
     with session_scope() as s:
-        did = pipeline.ingest_upload(s, tid, users["uploader"], "doc", data, "auto").document_id
+        did = pipeline.ingest_upload(s, tid, users["uploader"], "doc", data, declared).document_id
     jobs.drain()
+    process.calls = [c["pass"] for c in llm.calls]
     return did
 
 
@@ -53,6 +55,27 @@ def misread_gstin(g: str) -> str:
     raise AssertionError("no confusable character")
 
 
+# --- call budget: model calls only where nothing cheaper can decide ------------------------------
+
+def test_einvoice_scan_needs_one_call(tenant_and_users):
+    did = process(make_einvoice(random.Random(30), "good_scan"), tenant_and_users)
+    assert process.calls == ["primary"] and doc(did).status == "ready"  # the QR names the type and proves the figures
+
+
+def test_declared_scan_needs_at_most_two_calls(tenant_and_users):
+    did = process(make_invoice(random.Random(29), "good_scan"), tenant_and_users, declared="invoice")
+    assert process.calls in (["primary"], ["primary", "crop"]) and doc(did).status == "ready"
+
+
+def test_wrong_declared_type_is_reported_not_rewritten(tenant_and_users):
+    did = process(make_invoice(random.Random(28), "good_scan"), tenant_and_users, declared="po", observed_type="invoice")
+    assert doc(did).doc_type == "po" and process.calls[0] == "primary"
+    with session_scope() as s:
+        notes = s.execute(select(ValidationResult.message).where(ValidationResult.document_id == did,
+                                                                 ValidationResult.status == "note")).scalars().all()
+    assert any("looks like Tax invoice" in n for n in notes), notes
+
+
 # --- signed e-invoice QR ------------------------------------------------------------------------
 
 def test_einvoice_qr_confirms_fields_and_document_goes_straight_through(tenant_and_users):
@@ -70,7 +93,7 @@ def test_einvoice_qr_confirms_fields_and_document_goes_straight_through(tenant_a
 def test_gstin_misread_by_both_passes_is_caught_by_the_qr(tenant_and_users):
     sd = make_einvoice(random.Random(32), "good_scan")
     bad = misread_gstin(sd.truth["supplier_gstin"])
-    did = process(sd, tenant_and_users, errors={"primary": {"supplier_gstin": bad}, "secondary": {"supplier_gstin": bad}})
+    did = process(sd, tenant_and_users, errors={"primary": {"supplier_gstin": bad}})
     g = fields(did)["supplier_gstin"]
     assert g.needs_review and g.suggested_value == sd.truth["supplier_gstin"]
     assert "e-invoice QR" in g.review_reason
@@ -94,33 +117,31 @@ def test_edited_print_contradicting_its_signed_qr(tenant_and_users):
     assert doc(did).arithmetic_ok is False  # QR mismatch is an error-severity finding
 
 
-# --- hard documents: third blind read ------------------------------------------------------------
+# --- hard documents: strong model, zoomed re-read of what isn't proven ---------------------------
 
-def test_handwritten_document_gets_three_readings_per_key_figure(tenant_and_users):
+def test_handwritten_document_reads_with_strong_model_and_proves_the_figures(tenant_and_users):
     sd = make_invoice(random.Random(35), "good_scan")
     did = process(sd, tenant_and_users, handwriting=True)
-    f = fields(did)
-    assert "3 of 3 readings agree" in (f["grand_total"].evidence or [])
-    assert not f["grand_total"].needs_review
-    assert doc(did).evidence_summary["votes_3of3"] >= 5
+    f, d = fields(did), doc(did)
+    assert d.model_used == "claude-opus-5-5"
+    assert not f["grand_total"].needs_review and "adds up" in (f["grand_total"].evidence or [])
+    assert d.evidence_summary["proven"] >= 10 and d.evidence_summary["zoom_confirmed"] >= 1
 
 
-def test_hard_document_where_the_zoomed_crop_dissents(tenant_and_users):
+def test_zoomed_reread_dissent_goes_to_a_person(tenant_and_users):
     sd = make_invoice(random.Random(36), "good_scan")
-    wrong = sd.truth["grand_total"] + 90
-    did = process(sd, tenant_and_users, handwriting=True, errors={"crop": {"grand_total": wrong}})
-    gt = fields(did)["grand_total"]
-    # pages A and B agree with each other and with the arithmetic: the value is kept, the dissent is shown
-    assert gt.value == sd.truth["grand_total"] and gt.needs_review
+    did = process(sd, tenant_and_users, handwriting=True, errors={"crop": {"invoice_number": "INV-0000"}})
+    n = fields(did)["invoice_number"]
+    # nothing proves either reading: the page reading is kept, a person picks
+    assert n.value == sd.truth["invoice_number"] and n.alt_value == "INV-0000" and n.needs_review
+    assert "Two readings differ" in n.review_reason
 
 
-def test_missed_row_does_not_shift_every_later_row(tenant_and_users):
+def test_missed_row_is_never_auto_accepted(tenant_and_users):
     sd = make_invoice(random.Random(37), "good_scan", n_lines=4)
-    did = process(sd, tenant_and_users, drop_lines={"secondary": [1]})
-    f = fields(did)
-    for i in (0, 2, 3):  # rows after the missed one still align with their true partner
-        assert not f[f"line_items[{i}].taxable_value"].needs_review, i
-    assert checks_of(did)["line_count"].status == "fail"
+    did = process(sd, tenant_and_users, drop_lines={"primary": [1]})
+    assert doc(did).status == "needs_review"
+    assert checks_of(did)["lines_sum_subtotal"].status == "fail"
 
 
 # --- arithmetic-guided repair ---------------------------------------------------------------------
@@ -144,8 +165,7 @@ def test_whole_number_quantities_never_get_fractional_suggestions():
 def test_day_month_swap_caught_by_financial_year_in_invoice_number(tenant_and_users):
     sd = make_invoice(random.Random(38), "good_scan")
     sd.truth.update(invoice_number="INV/25-26/0007", invoice_date="2025-04-03")
-    did = process(sd, tenant_and_users, errors={"primary": {"invoice_date": "2025-03-04"},
-                                                 "secondary": {"invoice_date": "2025-03-04"}})
+    did = process(sd, tenant_and_users, errors={"primary": {"invoice_date": "2025-03-04"}})
     d = fields(did)["invoice_date"]
     assert d.needs_review and d.suggested_value == "2025-04-03"
     assert "day and month were probably swapped" in d.review_reason
@@ -157,7 +177,7 @@ def test_buyer_gstin_repaired_from_company_master_data(tenant_and_users):
     with session_scope() as s:
         s.get(Tenant, tid).settings = {"own_gstins": [sd.truth["buyer_gstin"]]}
     bad = misread_gstin(sd.truth["buyer_gstin"])
-    did = process(sd, tenant_and_users, errors={"primary": {"buyer_gstin": bad}, "secondary": {"buyer_gstin": bad}})
+    did = process(sd, tenant_and_users, errors={"primary": {"buyer_gstin": bad}})
     g = fields(did)["buyer_gstin"]
     assert g.needs_review and g.suggested_value == sd.truth["buyer_gstin"]
     assert "your GSTIN" in g.review_reason

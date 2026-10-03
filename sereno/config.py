@@ -22,17 +22,24 @@ class Settings(BaseSettings):
     master_key_id: str = "local-v1"
 
     # --- Models -----------------------------------------------------------------------------
-    # Accuracy first: Opus for anything that is not a trivially clean digital document.
-    # Provider is set by llm_backend ("anthropic" | "gemini" | "fake"); "fake" is used by tests and
-    # the offline demo seeder, never in prod. Gemini support (sereno/extraction/gemini_llm.py)
-    # stays in the codebase behind SERENO_LLM_BACKEND=gemini, but Claude is the default.
+    # One page read, then deterministic verification, then ONE zoomed re-read of whatever the
+    # checks could not prove (docs/ARCHITECTURE.md, "Call budget"). The first read uses Sonnet on
+    # clean/good documents and Opus on poor scans and LRs; the re-read is always Opus on zoomed
+    # crops: a different model and a different view, so the two readings fail independently.
+    # Provider: llm_backend ("anthropic" | "gemini" | "fake"); "fake" is for tests and the offline
+    # demo only. Gemini (sereno/extraction/gemini_llm.py) is opt-in via SERENO_LLM_BACKEND=gemini.
     llm_backend: str = "anthropic"
-    model_complex: str = "claude-opus-5"
-    model_clean: str = "claude-sonnet-5"
-    model_triage: str = "claude-sonnet-5"
-    extraction_effort: str = "high"
-    extraction_effort_hard: str = "xhigh"  # handwriting, Indic script, poor scans: think harder
-    crop_reads: bool = True                # third blind read on zoomed crops (disputes, hard docs, failed maths)
+    model_complex: str = "claude-opus-5-5"
+    model_clean: str = "claude-sonnet-5-5"
+    model_triage: str = "claude-sonnet-5-5"   # only for multi-page scans (batch splitting)
+    model_verify: str = "claude-opus-5-5"
+    # Vision accuracy on these models comes from zoomed crops more than from extra thinking, so the
+    # page read runs at medium effort and only hard documents go to high.
+    extraction_effort: str = "medium"
+    extraction_effort_hard: str = "high"
+    verify_effort: str = "medium"
+    crop_reads: bool = True                # the zoomed re-read of unverified fields
+    max_verify_items: int = 40
     arithmetic_repair: bool = True
     # NIC IRP public keys (PEM) to verify e-invoice QR signatures; without them QR data is used unverified
     einvoice_public_keys_pem: list[str] = Field(default_factory=list)
@@ -40,7 +47,11 @@ class Settings(BaseSettings):
     enable_refusal_fallback: bool = True
     llm_max_retries: int = 3
     llm_timeout_s: float = 300.0
-    max_image_long_edge: int = 2400
+    # Image tokens scale with pixel area (~1 per 28x28 patch, 2576 px max). Digital PDFs also send
+    # their text layer, so they need fewer pixels; poor scans get the full resolution.
+    max_image_long_edge: int = 2576
+    page_edge_digital: int = 1800
+    page_edge_good: int = 2200
     max_pages_per_document: int = 12
 
     # --- Quality gates ----------------------------------------------------------------------
@@ -53,7 +64,7 @@ class Settings(BaseSettings):
     auto_accept_threshold: float = 0.90   # tuned weekly by eval/backtest.py
     high_stakes_threshold: float = 0.95   # stricter bar for totals / taxes / quantities
     doc_arithmetic_penalty: float = 0.80  # multiplies every field score if any math check fails
-    qa_sample_rate: float = 0.05          # share of fully auto-accepted docs sent to spot-check
+    qa_sample_rate: float = 0.05          # share of documents where a person confirms every field (calibration)
     amount_tolerance_abs: float = 1.0     # rupees; covers legitimate round-off
     amount_tolerance_rel: float = 0.00002  # ₹2 per crore; anything looser hides real misreads
 

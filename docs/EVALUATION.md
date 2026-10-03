@@ -75,6 +75,8 @@ Tighten, never loosen, without a written reason.
 ## 6. After the gate
 
 - Re-run on every prompt/model change (`PROMPT_VERSION` is logged per extraction).
-- Production QA spot checks (5% of auto-approved docs by default, `SERENO_QA_SAMPLE_RATE`) keep
-  measuring the escape rate on live traffic; the weekly backtest uses them to set thresholds.
+- Production spot checks (5% of all documents by default, `SERENO_QA_SAMPLE_RATE`; the reviewer
+  confirms every field) keep measuring the escape rate on live traffic. The weekly backtest
+  certifies thresholds from them: with 95% confidence, at most 1% of auto-accepted fields wrong
+  (0.3% for high-stakes fields). No certificate, no threshold change.
 - Report accuracy to customers per bucket, with sample sizes. Never a single blended number.

@@ -97,13 +97,16 @@ class AnthropicLLM:
         kwargs = dict(
             model=model,
             max_tokens=max_tokens,
-            system=system,
+            # Static per pass and document type, so it is cached across documents (cache reads
+            # bill at a fraction of input price); the per-document content follows it.
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": content}],
             output_config={"effort": effort or s.extraction_effort,
                            "format": {"type": "json_schema", "schema": schema}},
         )
         t0 = time.monotonic()
-        use_fallback = s.enable_refusal_fallback and model.startswith("claude-opus-5") and not AnthropicLLM._fallback_off
+        use_fallback = (s.enable_refusal_fallback and model.startswith(("claude-opus-5", "claude-sonnet-5-5"))
+                        and not AnthropicLLM._fallback_off)
         try:
             msg = self._send_with_retry(kwargs, use_fallback)
         except (anthropic.BadRequestError, anthropic.PermissionDeniedError) as e:
@@ -138,7 +141,9 @@ class AnthropicLLM:
         return LLMResult(data=data, model=model, served_model=getattr(msg, "model", None),
                          request_id=getattr(msg, "_request_id", None),
                          input_tokens=msg.usage.input_tokens, output_tokens=msg.usage.output_tokens,
-                         latency_ms=latency, stop_reason=msg.stop_reason)
+                         latency_ms=latency, stop_reason=msg.stop_reason,
+                         cache_read_tokens=getattr(msg.usage, "cache_read_input_tokens", 0) or 0,
+                         cache_write_tokens=getattr(msg.usage, "cache_creation_input_tokens", 0) or 0)
 
 
 def _explain(e: "anthropic.APIStatusError") -> str:

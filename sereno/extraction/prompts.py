@@ -1,10 +1,11 @@
 """Prompt text, versioned. Any wording change bumps PROMPT_VERSION so the eval log can attribute
-accuracy shifts to prompt changes. System prompts are static (prompt-cache friendly)."""
+accuracy shifts to prompt changes. System prompts are static per document type (with the field
+guide inside them) so they are served from the prompt cache across documents."""
 from __future__ import annotations
 
 from sereno.extraction.doc_specs import DocSpec
 
-PROMPT_VERSION = "2026-09-28.1"
+PROMPT_VERSION = "2026-10-03.1"
 
 _COMMON_RULES = """\
 Rules that always apply:
@@ -51,31 +52,10 @@ Line items:
 anomalies: short factual notes a reviewer should know (e.g. "total overwritten by hand",
 "stamp covers the IGST amount", "two invoices in one file", "page 2 missing", "amount in words
 disagrees with figures"). Empty list if none.
-"""
 
-SECONDARY_SYSTEM = f"""\
-You are an internal auditor independently re-keying the critical numbers and identifiers from a
-document for a control check. Your reading will be compared character-by-character with another
-clerk's, so read each value directly from the image, digit by digit. You are shown the page as
-overlapping horizontal strips (zoomed) followed by the full page for context; values that appear
-in two overlapping strips are the same value, not two values.
-
-{_COMMON_RULES}
-Line items: list every goods/service row top to bottom in document order, excluding totals rows.
-"""
-
-VERIFY_SYSTEM = f"""\
-You are the senior reviewer resolving disagreements between two independent readings (A and B)
-of the same document. For each disputed field, look carefully at the document (zoomed crops are
-provided where available) and decide which reading matches what is actually printed.
-- choice "A" or "B" if one is exactly right; "neither" if both are wrong (give the correct
-  reading in value_as_printed); "unreadable" if the document genuinely cannot be read there.
-- value_as_printed: the characters exactly as they appear, "" if unreadable/not present.
-- certain: false unless you can see every character clearly.
-- reason: one short sentence.
-Do not favour A or B by default; they are equally likely to be wrong.
-
-{_COMMON_RULES}
+document_type_observed: what the document actually is (invoice, lr, po, grn, contract, or other),
+even when it differs from the expected type named below. languages: every script on the page.
+handwriting_present: true if any value is handwritten, including figures on a printed form.
 """
 
 TRIAGE_SYSTEM = """\
@@ -99,8 +79,8 @@ means every page is 1.
 """
 
 
-def field_guide(spec: DocSpec, template_hints: str | None = None) -> str:
-    lines = [f"Document type: {spec.label} ({spec.description}).", "", "Header fields:"]
+def field_guide(spec: DocSpec) -> str:
+    lines = [f"Expected document type: {spec.label} ({spec.description}).", "", "Header fields:"]
     for f in spec.fields:
         hint = f" ({f.hint})" if f.hint else ""
         lines.append(f"- {f.name}: {f.label} [{f.type}]{hint}")
@@ -111,9 +91,15 @@ def field_guide(spec: DocSpec, template_hints: str | None = None) -> str:
             lines.append(f"- {f.name}: {f.label} [{f.type}]{hint}")
     if spec.extra_guidance:
         lines += ["", spec.extra_guidance]
-    if template_hints:
-        lines += ["", "Layout notes for this vendor's format (learned from reviewed examples):", template_hints]
     return "\n".join(lines)
+
+
+def primary_system(spec: DocSpec) -> str:
+    return PRIMARY_SYSTEM + "\n" + field_guide(spec)
+
+
+def template_block(hints: str) -> str:
+    return "Layout notes for this vendor's format (learned from reviewed examples):\n" + hints
 
 
 def text_layer_block(page_texts: list[str]) -> str:

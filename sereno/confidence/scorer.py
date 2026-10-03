@@ -1,13 +1,16 @@
 """Field-level confidence built from evidence, never from the model's self-reported certainty.
 
-Signals: (a) self-consistency between independent passes, (b) arithmetic / format / compliance
-checks, (c) pre-extraction document quality, (d) historical accuracy for this vendor x doc type x
-field, plus text-layer grounding for digital PDFs and raw/normalised consistency.
+Signals: (a) proof without a model (QR code, exact arithmetic, the PDF text layer, company records),
+(b) agreement between the page reading and an independent zoomed re-read by another model,
+(c) arithmetic / format / compliance checks, (d) document quality, (e) historical accuracy for this
+vendor x doc type x field. The model's own confidence is never used: it does not separate right
+from wrong extractions (ExtractConf, 2026; Xiong et al., ICLR 2024).
 
 score = sigmoid(bias + sum(w_i * x_i)), then the whole document is multiplied by a penalty if any
-error-severity check failed. Weights start from engineering judgement (below) and are refit
-weekly against reviewer corrections by eval/backtest.py; features are persisted per field so the
-refit uses exactly what the scorer saw. Hard rules force review regardless of score.
+error-severity check failed. Weights start from engineering judgement (below); eval/backtest.py
+refits them and certifies the auto-accept thresholds against spot-check outcomes (Learn then
+Test, exact binomial tails). Features are persisted per field so the refit uses exactly what the
+scorer saw. Hard rules force review regardless of score (reason code "forced").
 """
 from __future__ import annotations
 
@@ -20,12 +23,13 @@ from sereno.validation.checks import CheckResult
 DEFAULT_WEIGHTS: dict[str, float] = {
     "bias": 2.0,
     "legibility_clear": 0.5,      # model self-report: weak on its own, never sufficient alone
-    "absent_optional": 0.5,       # optional field reported as not on the document
+    "absent_optional": 2.0,       # optional field reported absent by the schema-guided reading, which errs by
+                                  # inventing values rather than omitting them (ExtractConf, 2026)
     "legibility_partly": -2.0,
     "legibility_illegible": -5.0,
-    "agree": 2.0,
+    "proven": 1.5,                # proven without a model: QR, exact arithmetic, text layer, records (evidence.py)
+    "agree": 2.5,                 # an independent zoomed re-read by another model agrees
     "disagree": -3.5,
-    "verifier_certain": 0.8,
     "raw_inconsistent": -2.5,
     "raw_consistent": 0.3,
     "in_text_layer": 2.0,
@@ -46,8 +50,7 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "code_match": 4.0,            # agrees with a machine-readable code (signed e-invoice QR, UPI QR, barcode)
     "code_filled": 3.0,           # absent/illegible in print, taken from the code
     "code_mismatch": -4.0,
-    "votes3": 1.5,                # three independent readings (page, page strips, zoomed crop) agree
-    "vote_split": -2.0,
+    "zoom_illegible": -2.0,       # not readable even when zoomed in
     "repaired": -3.0,             # value corrected by arithmetic + another reading: always shown to a person
     "master_match": 1.5,          # matches the company's own records / this vendor's history
 }
@@ -87,9 +90,9 @@ def features_for(fv: FieldValue, checks_by_key: dict[str, list[CheckResult]], do
     x["absent_optional"] = float(fv.value is None and fv.legibility == "not_present" and not fv.spec.required)
     x["legibility_partly"] = float(fv.legibility == "partly_legible")
     x["legibility_illegible"] = float(fv.legibility == "illegible")
+    x["proven"] = float(bool(fv.verified_by))
     x["agree"] = float(fv.double_read and fv.agreement is True)
     x["disagree"] = float(fv.double_read and fv.agreement is False)
-    x["verifier_certain"] = float(bool(fv.verifier_certain) and fv.verifier_choice in ("A", "B", "neither"))
     x["raw_inconsistent"] = float(fv.raw_consistent is False)
     x["raw_consistent"] = float(fv.raw_consistent is True)
     x["in_text_layer"] = float(fv.in_text_layer is True)
@@ -111,8 +114,7 @@ def features_for(fv: FieldValue, checks_by_key: dict[str, list[CheckResult]], do
     x["code_match"] = float(fv.code_agrees is True and not fv.code_filled)
     x["code_filled"] = float(fv.code_filled)
     x["code_mismatch"] = float(fv.code_agrees is False)
-    x["votes3"] = float(fv.votes == "3/3")
-    x["vote_split"] = float(fv.votes in ("2/3", "1/1/1", "illegible on zoom"))
+    x["zoom_illegible"] = float(fv.zoom_illegible)
     x["repaired"] = float(fv.repaired)
     x["master_match"] = float(fv.master_match is True)
     return x
@@ -153,43 +155,39 @@ def score_document(doc: ExtractedDoc, checks: list[CheckResult], quality_bucket:
             else:
                 reasons.append((3, f"warn:{c.check_id}", c.message))
         if x["missing_required"]:
-            reasons.append((1, "missing_required", f"{fv.spec.label} wasn't found on the document"))
+            reasons.append((1, "missing_required", "Not found on the document"))
         if fv.repaired:
             reasons.append((0, "repaired", fv.suggestion_reason or "Corrected automatically; please confirm"))
         elif x["disagree"]:
-            a, b = fv.value, fv.alt_value
-            why = f"Two independent readings differ ({_fmt(a)} vs {_fmt(b)})"
-            if fv.votes == "2/3":
-                why = f"2 of 3 independent readings say {_fmt(a)} (one said {_fmt(b)})"
-            elif fv.votes == "1/1/1":
-                why = f"Three readings disagree ({_fmt(a)}, {_fmt(b)}, {_fmt(fv.third_value)})"
+            why = "Found only on the zoomed re-read" if "found on zoom" in fv.evidence else "Two readings differ"
             reasons.append((1, "disagree", why))
         if fv.suggested_value is not None and not fv.repaired:
-            reasons.append((1, "suggestion", f"Suggested {_fmt(fv.suggested_value)}: {fv.suggestion_reason}"))
-        if fv.votes == "illegible on zoom":
-            reasons.append((1, "illegible_zoom", f"{fv.spec.label} could not be read even when zoomed in"))
+            reasons.append((1, "suggestion", fv.suggestion_reason or f"Suggested {_fmt(fv.suggested_value)}"))
+        if fv.zoom_illegible:
+            reasons.append((1, "illegible_zoom", "Unreadable even when zoomed in"))
         if x["unparseable"]:
-            reasons.append((1, "unparseable", f"{fv.spec.label} couldn't be read as a {fv.spec.type}"))
+            reasons.append((1, "unparseable", f"Not a valid {fv.spec.type}"))
         if fv.legibility == "illegible":
-            reasons.append((1, "illegible", f"{fv.spec.label} is not legible on the document"))
+            reasons.append((1, "illegible", "Not legible on the document"))
         elif fv.legibility == "partly_legible" and fv.value is not None:
-            reasons.append((2, "partly_legible", f"{fv.spec.label} is partly unclear on the document"))
+            reasons.append((2, "partly_legible", "Partly unclear on the document"))
         if x["raw_inconsistent"]:
-            reasons.append((2, "raw_inconsistent", "The value doesn't match the text as printed"))
+            reasons.append((2, "raw_inconsistent", "Doesn't match the text as printed"))
         if x["not_in_text_layer"] and fv.spec.high_stakes:
-            reasons.append((2, "not_in_text_layer", "Value not found in the PDF's text"))
+            reasons.append((2, "not_in_text_layer", "Not in the PDF's text"))
         hard = any(p <= 1 for p, _, _ in reasons) or (fv.spec.high_stakes and fv.legibility == "partly_legible"
                                                      and fv.value is not None)
         needs_review = hard or raw < threshold
         if needs_review and not reasons:
-            reasons.append((4, "low_score", "Low confidence reading; please confirm"))
+            reasons.append((4, "low_score", "Check it isn't on the document" if fv.value is None
+                            else "Not proven; please confirm"))
         band = "high" if s >= threshold and not needs_review else ("medium" if s >= 0.6 and not hard else "low")
         if doc_failed and band == "high":
             band = "medium"
         reasons.sort(key=lambda r: r[0])
         out[fv.key] = FieldScore(score=round(s, 4), band=band, needs_review=needs_review,
                                  reason=reasons[0][2] if needs_review and reasons else None,
-                                 reason_codes=[r[1] for r in reasons], features=x)
+                                 reason_codes=[r[1] for r in reasons] + (["forced"] if hard else []), features=x)
     return out
 
 

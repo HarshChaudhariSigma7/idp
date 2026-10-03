@@ -2,7 +2,8 @@
 additionalProperties:false everywhere. These tests keep every schema inside them."""
 import json
 
-from sereno.extraction.doc_specs import SPECS, TRIAGE_SCHEMA, VERIFY_SCHEMA, primary_schema, secondary_schema, spec_with_extras
+from sereno.extraction.crossread import CROP_SCHEMA
+from sereno.extraction.doc_specs import SPECS, TRIAGE_SCHEMA, primary_schema, spec_with_extras
 
 
 def _walk(node, stats):
@@ -23,9 +24,9 @@ def _walk(node, stats):
 
 
 def test_all_schemas_within_limits():
-    schemas = [TRIAGE_SCHEMA, VERIFY_SCHEMA]
+    schemas = [TRIAGE_SCHEMA, CROP_SCHEMA]
     for t in SPECS:
-        schemas += [primary_schema(SPECS[t]), secondary_schema(SPECS[t])]
+        schemas.append(primary_schema(SPECS[t]))
     schemas.append(primary_schema(spec_with_extras("invoice", [{"name": "vendor_code", "label": "Vendor code"}])))
     for sch in schemas:
         stats = {"unions": 0, "optional": 0}

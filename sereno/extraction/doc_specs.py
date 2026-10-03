@@ -1,6 +1,6 @@
 """Per-document-type field specifications. One declarative spec drives: the strict JSON schema sent
-to Claude, the second-pass (self-consistency) schema, normalisation, confidence rules, review UI
-labels and export columns. Adding a field to a template is data, not code."""
+to Claude, the field guide in the prompt, normalisation, confidence rules, review UI labels and
+export columns. Adding a field to a template is data, not code."""
 from __future__ import annotations
 
 import re
@@ -319,39 +319,6 @@ def primary_schema(spec: DocSpec) -> dict:
         schema["required"].append("line_items")
     return schema
 
-
-def secondary_schema(spec: DocSpec) -> dict:
-    """Independent full re-read (different framing, original pixels, no locations). Every field
-    gets a second reading so agreement is evidence for all fields, not only the high-stakes ones."""
-    header = {f.name: {"$ref": "#/$defs/cell"} for f in spec.fields}
-    schema: dict = {
-        "type": "object", "additionalProperties": False, "$defs": {"cell": _CELL},
-        "properties": {"fields": {"type": "object", "additionalProperties": False,
-                                  "required": list(header), "properties": header}},
-        "required": ["fields"],
-    }
-    if spec.line_fields:
-        cells = {f.name: {"$ref": "#/$defs/cell"} for f in spec.line_fields}
-        schema["properties"]["line_items"] = {
-            "type": "array", "items": {"type": "object", "additionalProperties": False,
-                                       "required": list(cells), "properties": cells}}
-        schema["required"].append("line_items")
-    return schema
-
-
-VERIFY_SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["verdicts"],
-    "properties": {"verdicts": {"type": "array", "items": {
-        "type": "object", "additionalProperties": False,
-        "required": ["key", "choice", "value_as_printed", "certain", "reason"],
-        "properties": {
-            "key": {"type": "string"},
-            "choice": {"enum": ["A", "B", "neither", "unreadable"]},
-            "value_as_printed": {"type": "string"},
-            "certain": {"type": "boolean"},
-            "reason": {"type": "string"},
-        }}}},
-}
 
 TRIAGE_SCHEMA = {
     "type": "object", "additionalProperties": False,

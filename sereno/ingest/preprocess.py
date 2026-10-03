@@ -88,9 +88,27 @@ def fit_long_edge(img: np.ndarray, long_edge: int) -> np.ndarray:
     return cv2.resize(img, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
 
 
-def tiles(img: np.ndarray, n: int = 2, overlap: float = 0.12) -> list[np.ndarray]:
-    """Horizontal bands with overlap: the second pass reads these at higher effective resolution."""
-    h = img.shape[0]
-    band = h / n
-    pad = int(band * overlap)
-    return [img[max(0, int(i * band) - pad): min(h, int((i + 1) * band) + pad)] for i in range(n)]
+def content_frame(img: np.ndarray, pad: float = 0.02, min_saving: float = 0.08) -> tuple[float, float, float, float]:
+    """Fractional (x0, y0, x1, y1) of the inked area, padded. Blank scanner margins cost image tokens
+    and dilute resolution; trimming them gives the text more pixels for the same token budget.
+    Returns the full frame when trimming would save under min_saving of the area (or on dark
+    backgrounds such as phone photos on a desk, where everything looks like ink)."""
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if img.ndim == 3 else img
+    small = fit_long_edge(gray, 800)
+    ink = small < min(200, int(np.median(small)) - 40)
+    rows, cols = np.where(ink.mean(axis=1) > 0.003)[0], np.where(ink.mean(axis=0) > 0.003)[0]
+    full = (0.0, 0.0, 1.0, 1.0)
+    if len(rows) < 2 or len(cols) < 2:
+        return full
+    h, w = ink.shape
+    x0, x1 = max(0.0, cols[0] / w - pad), min(1.0, (cols[-1] + 1) / w + pad)
+    y0, y1 = max(0.0, rows[0] / h - pad), min(1.0, (rows[-1] + 1) / h + pad)
+    if (x1 - x0) * (y1 - y0) > 1 - min_saving:
+        return full
+    return (float(x0), float(y0), float(x1), float(y1))
+
+
+def cut(img: np.ndarray, frame: tuple[float, float, float, float]) -> np.ndarray:
+    h, w = img.shape[:2]
+    x0, y0, x1, y1 = frame
+    return img[int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)]

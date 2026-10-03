@@ -98,9 +98,11 @@ def recheck(s, doc: Document) -> list[dict]:
 
 
 def complete_document(s, user, doc: Document, override_failed_checks: bool = False) -> dict:
-    pending = [f for f in doc.fields if f.needs_review and f.status == "pending"]
+    # a spot check is only a valid accuracy sample if every field was actually looked at
+    pending = [f for f in doc.fields if (f.status not in ("confirmed", "corrected") if doc.is_qa_sample
+                                         else f.needs_review and f.status == "pending")]
     if pending:
-        raise ReviewError(f"{len(pending)} flagged field(s) still need a decision")
+        raise ReviewError(f"{len(pending)} field{'s' if len(pending) > 1 else ''} still need a decision")
     failed = recheck(s, doc)
     blocking = [c for c in failed if c["severity"] == "error"]
     if blocking and not override_failed_checks:
@@ -113,8 +115,8 @@ def complete_document(s, user, doc: Document, override_failed_checks: bool = Fal
     doc.reviewed_at = now
     if doc.status in ("needs_review", "unreadable"):
         doc.status = "ready"
-        doc.status_message = ("Ready to export — reviewed and confirmed" if not blocking else
-                              "Ready to export — reviewer confirmed figures as printed (they don't fully reconcile)")
+        doc.status_message = ("Reviewed and confirmed" if not blocking else
+                              "Confirmed as printed (figures don't fully reconcile)")
     doc.blob_expires_at = min(doc.blob_expires_at or now, now + timedelta(hours=st.doc_grace_after_done_hours))
     get_store().set_expiry(DOCS, doc.id, doc.blob_expires_at)
     _update_vendor_stats(s, doc)

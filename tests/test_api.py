@@ -104,7 +104,7 @@ def test_end_to_end_review_export_and_rbac(client, tenant_and_users):
     assert client.get(f"/api/documents/{doc_id}/pages/1").headers["content-type"] == "image/jpeg"
     flagged = [f for f in doc["fields"] if f["needs_review"]]
     assert [f["key"] for f in flagged] == ["line_items[0].quantity"]
-    assert "Needs your review" in doc["message"]
+    assert doc["message"].startswith(("Confirm", "Quantity"))
     r = client.post(f"/api/review/{doc_id}/complete", json={}, headers=H)
     assert r.status_code == 400  # can't complete with pending fields
     bad = client.post(f"/api/review/{doc_id}/fields/{flagged[0]['id']}", json={"action": "correct", "value": "abc"}, headers=H)
@@ -123,8 +123,7 @@ def test_end_to_end_review_export_and_rbac(client, tenant_and_users):
     assert set(conds) == {"overall", "printed", "vernacular", "handwritten"}
     assert conds["overall"]["fields"] > 0 and not conds["overall"]["measured"]  # < 200 fields: no claim
     assert conds["overall"]["caught_before_export_pct"] == 100.0  # the one error was flagged, not exported
-    steps = [t["step"] for t in dash["technology"]]
-    assert steps[0] == "Quality pre-check" and "Machine-readable codes" in steps and len(steps) == 8
+    assert "technology" not in dash
     r = client.get("/api/exports", params={"doc_type": "invoice", "fmt": "csv"})
     assert r.status_code == 200
     text = r.content.decode("utf-8-sig")

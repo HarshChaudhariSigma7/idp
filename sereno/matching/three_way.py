@@ -170,10 +170,10 @@ def three_way_match(po: ExtractedDoc, grns: list[ExtractedDoc], inv: ExtractedDo
     incomplete = not po.lines or not inv.lines
     blocks = [i for i in issues if i.severity == "block"]
     if incomplete:
-        status, summary = "incomplete", "Can't match yet — line items are missing on the PO or invoice"
+        status, summary = "incomplete", "Can't match yet: line items are missing on the PO or invoice"
     elif blocks:
         status = "mismatch"
-        summary = f"{len(blocks)} mismatch{'es' if len(blocks) > 1 else ''} — hold payment until resolved"
+        summary = f"{len(blocks)} mismatch{'es' if len(blocks) > 1 else ''}: hold payment until resolved"
     else:
         status = "matched"
         summary = "PO, goods received and invoice agree" + (" (see notes)" if issues else "")

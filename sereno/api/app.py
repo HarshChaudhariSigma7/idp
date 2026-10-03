@@ -8,7 +8,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request,
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from sereno import jobs, pipeline  # noqa: F401  (registers job handlers)
@@ -247,7 +247,8 @@ def review_queue(user: User = Depends(require("review.work")), s: Session = Depe
     q = scope_documents(s.query(Document), user).filter(Document.reviewed_at.is_(None), Document.review_entered_at.is_not(None))
     if user.role in ("admin", "manager"):
         pass  # managers see the whole company queue
-    docs = q.order_by(Document.is_qa_sample, Document.review_due_at).limit(300).all()
+    # flagged documents first (spot-checked or not); pure spot checks of auto-approved documents last
+    docs = q.order_by(and_(Document.is_qa_sample, Document.fields_flagged == 0), Document.review_due_at).limit(300).all()
     now = utcnow()
     return {"now": now, "documents": [{**_doc_summary(d), "overdue": bool(d.review_due_at and d.review_due_at < now)}
                                       for d in docs]}

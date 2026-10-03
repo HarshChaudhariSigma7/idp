@@ -8,7 +8,7 @@ from typing import Protocol
 
 # Approximate list prices, USD per million tokens (input, output), for cost metrics only; verify
 # against the current provider pricing page before relying on these for billing.
-PRICES = {"claude-opus-5": (5.0, 25.0), "claude-sonnet-5": (2.0, 10.0), "claude-opus-4-8": (5.0, 25.0),
+PRICES = {"claude-opus-5": (5.0, 25.0), "claude-sonnet-5": (2.0, 10.0), "claude-sonnet-5-5": (2.0, 10.0), "claude-opus-4-8": (5.0, 25.0),
           "claude-opus-5-5": (4.0, 20.0), "claude-haiku-4-5": (1.0, 5.0),
           "gemini-3.1-pro": (2.0, 12.0), "gemini-3-pro": (2.0, 12.0), "gemini-3.8-flash": (0.75, 3.75),
           "gemini-3.7-flash": (0.75, 3.75), "gemini-2.5-flash": (0.30, 2.50), "gemini-2.5-pro": (1.25, 10.0),
@@ -37,11 +37,16 @@ class LLMResult:
     output_tokens: int
     latency_ms: int
     stop_reason: str | None
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
     @property
     def cost_usd(self) -> float:
-        pin, pout = PRICES.get(self.served_model or self.model, PRICES.get(self.model, (5.0, 25.0)))
-        return (self.input_tokens * pin + self.output_tokens * pout) / 1e6
+        name = self.served_model or self.model
+        pin, pout = PRICES.get(name, PRICES.get(self.model, (5.0, 25.0)))
+        read = 0.05 if name.startswith("claude-opus-5-5") else 0.1  # cache-read multiplier
+        return (self.input_tokens * pin + self.cache_write_tokens * pin * 1.25 + self.cache_read_tokens * pin * read
+                + self.output_tokens * pout) / 1e6
 
 
 class LLMClient(Protocol):

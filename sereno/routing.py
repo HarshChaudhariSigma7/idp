@@ -40,13 +40,14 @@ def review_headline(failed_checks: list[CheckResult], flagged_labels: list[str])
     for prefix, phrase in _CHECK_PHRASES:
         if any(c.check_id.startswith(prefix) for c in failed_checks):
             extra = len(flagged_labels) - 1
-            return f"Needs your review — {phrase}" + (f" (+{extra} more)" if extra > 0 else "")
+            return phrase[0].upper() + phrase[1:] + (f" (+{extra} more)" if extra > 0 else "")
     if len(flagged_labels) == 1:
-        return f"Needs your review — please confirm {flagged_labels[0]}"
+        return f"Confirm {flagged_labels[0]}"
     if flagged_labels:
-        return f"Needs your review — {len(flagged_labels)} fields to confirm ({', '.join(flagged_labels[:2])}…)"
-    return "Needs your review"
+        more = f" +{len(flagged_labels) - 2}" if len(flagged_labels) > 2 else ""
+        return f"Confirm {', '.join(flagged_labels[:2])}{more}"
+    return "Confirm the flagged fields"
 
 
 def ready_message(total_fields: int) -> str:
-    return "Ready to export — all figures checked and consistent"
+    return "All figures checked and consistent"
