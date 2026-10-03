@@ -9,7 +9,7 @@ anything uncertain goes to a human, field by field. We never silently guess.
 
 | Area | State |
 |---|---|
-| Pipeline, validation, review UI, dashboard, exports, 3-way match, templates, security base | Built, 63 automated tests passing |
+| Pipeline, validation, review UI, dashboard, exports, 3-way match, templates, security base | Built, 73 automated tests passing |
 | Accuracy engine: one page reading, deterministic proof, one zoomed re-read of what isn't proven, evidence-backed repair, company records, batch split | Built; scenario + call-budget tests ([tests/test_accuracy_scenarios.py](tests/test_accuracy_scenarios.py)); QR decoding verified on real samples |
 | Auto-accept thresholds | Certified from spot checks with a statistical guarantee ([sereno/eval/backtest.py](sereno/eval/backtest.py)); needs real reviewed volume before it can certify |
 | Real web documents (25: printed, handwritten, Hindi, sideways, blank traps) | All non-model stages tested; 5 real-world bugs found and fixed ([datasets/web_v1](datasets/web_v1/README.md)). Model accuracy on them: needs `ANTHROPIC_API_KEY` |
@@ -81,7 +81,7 @@ upload ─► encrypted temp store (TTL) ─► pre-check: DPI, skew, blur, cont
 
 ```bash
 python3.11 -m venv .venv && .venv/bin/pip install -e ".[dev]" reportlab
-.venv/bin/pytest -q                                   # 63 tests, no API key needed
+.venv/bin/pytest -q                                   # 73 tests, no API key needed
 cp .env.example .env                                  # set ANTHROPIC_API_KEY + SERENO_MASTER_KEY_B64
 .venv/bin/python scripts/manage.py create-tenant "Acme Castings Ltd" admin@acme.in "Priya K" no
 .venv/bin/uvicorn sereno.api.app:app --port 8000      # http://localhost:8000
